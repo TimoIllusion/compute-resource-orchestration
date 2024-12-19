@@ -1,0 +1,44 @@
+version: "3.8"
+services:
+  central_dashboard:
+    build: ./central_dashboard
+    container_name: central_dashboard
+    ports:
+      - "8000:8000"
+    depends_on:
+      - node1_agent
+      - node2_agent
+    networks:
+      - cluster_net
+
+  node1_agent:
+    build: ./node_agent
+    container_name: node1_agent
+    environment:
+      - NODE_ID=node1
+      - DASHBOARD_URL=http://central_dashboard:8000
+    networks:
+      - cluster_net
+
+  node2_agent:
+    build: ./node_agent
+    container_name: node2_agent
+    environment:
+      - NODE_ID=node2
+      - DASHBOARD_URL=http://central_dashboard:8000
+    networks:
+      - cluster_net
+
+  streamlit_app:
+    build: ./streamlit_app
+    container_name: streamlit_app
+    ports:
+      - "8501:8501"
+    depends_on:
+      - central_dashboard
+    networks:
+      - cluster_net
+
+networks:
+  cluster_net:
+    driver: bridge
