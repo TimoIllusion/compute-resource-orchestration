@@ -33,7 +33,7 @@ for node_id, info in data.items():
                 )
                 if r.status_code == 200:
                     st.success("Node reserved successfully!")
-                    st.experimental_rerun()  # Refresh the page to see the updated status
+                    st.rerun()  # Refresh the page to see the updated status
                 else:
                     st.error("Failed to reserve node.")
             except Exception as e:
