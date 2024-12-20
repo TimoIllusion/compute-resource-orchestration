@@ -21,10 +21,11 @@ def generate_gpu_info():
             }
             for _ in range(random.randint(0, 5))
         ]
-        gpus[str(gpu_id)] = {  # Change to string key
+        gpus[str(gpu_id)] = {
             "max_mem": max_mem,
             "mem_usage": mem_usage,
             "processes": processes,
+            "reservation": None,  # Initialize with no reservation
         }
     return gpus
 

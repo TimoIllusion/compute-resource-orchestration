@@ -76,12 +76,11 @@ with tabs[0]:
         with col1:
             if st.button("Confirm Reservation"):
                 confirm = requests.post(
-                    f"{CENTRAL_DASHBOARD_URL}/api/request_gpu",
+                    f"{CENTRAL_DASHBOARD_URL}/api/reserve_gpu",
                     json={
                         "node_id": res["node_id"],
+                        "gpu_id": res["gpu_id"],
                         "user_name": res["user_name"],
-                        "mem_required": res["mem_required"],
-                        "session_type": res["session_type"],
                     },
                     timeout=5,
                 )
@@ -107,23 +106,24 @@ with tabs[1]:
             with mem_col:
                 st.write(f"**Memory Usage:** {info['mem_usage']:.2f} GB")
 
-            st.write(
-                f"**Reserved By:** {info['reservation'] if info['reservation'] else 'None'}"
-            )
-
             gpu_container = st.container()
             for gpu_id, gpu_info in info.get("gpus", {}).items():
                 with gpu_container:
                     st.write(f"**GPU {gpu_id}:**")
-                    col_gpu_mem, col_processes = st.columns([1, 2])
+                    col_gpu_mem, col_reservation = st.columns([1, 1])
                     with col_gpu_mem:
                         st.write(
                             f"Memory Usage: {gpu_info['mem_usage']:.2f} GB / {gpu_info['max_mem']:.2f} GB"
                         )
-                    with col_processes:
-                        st.write("Processes:")
-                        for process in gpu_info["processes"]:
-                            st.write(
-                                f"- PID: {process['pid']}, User: {process['user']}, "
-                                f"Memory: {process['mem_usage']:.2f} GB"
-                            )
+                    with col_reservation:
+                        reservation = gpu_info.get("reservation", None)
+                        st.write(
+                            f"**Reserved By:** {reservation if reservation else 'None'}"
+                        )
+
+                    st.write("Processes:")
+                    for process in gpu_info["processes"]:
+                        st.write(
+                            f"- PID: {process['pid']}, User: {process['user']}, "
+                            f"Memory: {process['mem_usage']:.2f} GB"
+                        )
