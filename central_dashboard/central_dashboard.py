@@ -80,6 +80,12 @@ class GPURequest(BaseModel):
     session_type: str
 
 
+class FindGPURequest(BaseModel):
+    user_name: str
+    mem_required: float
+    session_type: str
+
+
 @app.post("/api/request_gpu")
 def request_gpu(req: GPURequest):
     if req.node_id not in node_data:
@@ -99,3 +105,28 @@ def request_gpu(req: GPURequest):
             return {"status": "ok", "node_id": req.node_id, "gpu_id": gpu_id}
 
     return {"status": "error", "message": "No suitable GPU found"}
+
+
+@app.post("/api/find_best_gpu")
+def find_best_gpu(req: FindGPURequest):
+    best_gpu = None
+    best_node = None
+    most_available_mem = -1
+
+    for node_id, node_info in node_data.items():
+        for gpu_id, gpu_info in node_info.get("gpus", {}).items():
+            available_mem = gpu_info["max_mem"] - gpu_info["mem_usage"]
+            if available_mem >= req.mem_required and available_mem > most_available_mem:
+                most_available_mem = available_mem
+                best_gpu = gpu_id
+                best_node = node_id
+
+    if best_node is None:
+        return {"status": "error", "message": "No GPU with sufficient memory available"}
+
+    return {
+        "status": "ok",
+        "node_id": best_node,
+        "gpu_id": best_gpu,
+        "available_mem": most_available_mem,
+    }
