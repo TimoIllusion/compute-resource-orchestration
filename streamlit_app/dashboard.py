@@ -27,7 +27,7 @@ with tabs[0]:
             user = st.text_input("Your name", value="")
         with col2:
             mem_required = st.number_input(
-                "Memory required (GB)", min_value=0.1, step=0.1
+                "Memory required (GB)", min_value=1, step=1, value=5
             )
         with col3:
             session_type = st.selectbox("Session type", ["interactive", "job"])
@@ -81,7 +81,7 @@ with tabs[0]:
                         "node_id": res["node_id"],
                         "gpu_id": res["gpu_id"],
                         "user_name": res["user_name"],
-                        "mem_required": res["mem_required"],  # Add memory requirement
+                        "mem_required": res["mem_required"],
                     },
                     timeout=5,
                 )

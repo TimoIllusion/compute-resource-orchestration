@@ -114,6 +114,49 @@ def reserve_gpu(req: ReservationRequest):
     }
 
 
+@app.post("/api/finish_reservation")
+def finish_reservation(req: ReservationRequest):
+    """
+    Frees an active reservation and appends it to the node_reservations history.
+    """
+    if req.node_id not in node_data:
+        raise HTTPException(status_code=404, detail="Node not found")
+    if req.gpu_id not in node_data[req.node_id]["gpus"]:
+        raise HTTPException(status_code=404, detail="GPU not found")
+
+    gpu_info = node_data[req.node_id]["gpus"][req.gpu_id]
+    current_reservations = gpu_info.get("reservations", [])
+
+    # Find matching active reservation
+    matching = [
+        r
+        for r in current_reservations
+        if r["user"] == req.user_name and r["mem_reserved"] == req.mem_required
+    ]
+    if not matching:
+        raise HTTPException(status_code=404, detail="Reservation not found")
+
+    # Remove from active GPU reservations
+    current_reservations.remove(matching[0])
+
+    # Keep old reservations in separate store
+    if req.node_id not in node_reservations:
+        node_reservations[req.node_id] = {}
+    if req.gpu_id not in node_reservations[req.node_id]:
+        node_reservations[req.node_id][req.gpu_id] = []
+    node_reservations[req.node_id][req.gpu_id].append(matching[0])
+
+    return {"status": "freed", "reservation": matching[0]}
+
+
+@app.get("/api/list_reservation_history")
+def list_reservation_history():
+    """
+    Returns the stored history of all freed (old) reservations.
+    """
+    return node_reservations
+
+
 class GPURequest(BaseModel):
     node_id: str
     gpu_id: str
