@@ -4,6 +4,6 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY central_dashboard.py .
+COPY controller.py .
 
-CMD ["uvicorn", "central_dashboard:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "controller:app", "--host", "0.0.0.0", "--port", "8000"]

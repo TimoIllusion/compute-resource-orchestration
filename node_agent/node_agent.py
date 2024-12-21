@@ -4,38 +4,41 @@ import random
 import requests
 
 NODE_ID = os.environ.get("NODE_ID", "node_unknown")
-DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "http://central_dashboard:8000")
+DASHBOARD_URL = os.environ.get("CONTROLLER_URL", "http://central_controller:8000")
 
 
-def generate_gpu_info():
+# Fixed GPU configuration
+def initialize_gpu_info():
     gpus = {}
-    num_gpus = random.randint(1, 3)
+    num_gpus = 2  # Fixed number of GPUs
     for gpu_id in range(num_gpus):
-        max_mem = random.uniform(8, 16)  # Max memory in GB
-        mem_usage = random.uniform(0, max_mem)  # Current memory usage in GB
+        max_mem = 16.0  # Fixed max memory in GB
+        mem_usage = 2.0  # Initial memory usage in GB
         processes = [
             {
-                "pid": random.randint(1000, 5000),
-                "user": f"user{random.randint(1, 5)}",
-                "mem_usage": random.uniform(0.1, 2),
+                "pid": 1000 + gpu_id,
+                "user": f"user{gpu_id + 1}",
+                "mem_usage": 2.0,
             }
-            for _ in range(random.randint(0, 5))
         ]
         gpus[str(gpu_id)] = {
             "max_mem": max_mem,
             "mem_usage": mem_usage,
             "processes": processes,
-            "reservation": None,  # Initialize with no reservation
+            "reservation": None,
         }
     return gpus
 
 
+# Initialize GPU configuration once
+gpus = initialize_gpu_info()
+
 # We'll just run a loop and POST every 5 seconds
 while True:
-    cpu_usage = random.uniform(0, 100)  # Fake CPU usage %
-    mem_usage = random.uniform(0, 64)  # Fake memory usage in GB (or whatever scale)
+    cpu_usage = 30.0  # Fixed CPU usage %
+    mem_usage = 32.0  # Fixed memory usage in GB
     timestamp = time.time()
-    gpus = generate_gpu_info()
+
     data = {
         "node_id": NODE_ID,
         "cpu_usage": cpu_usage,

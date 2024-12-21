@@ -2,7 +2,7 @@ import streamlit as st
 import requests
 from pydantic import BaseModel
 
-CENTRAL_DASHBOARD_URL = "http://central_dashboard:8000"
+CENTRAL_CONTROLLER_URL = "http://central_controller:8000"
 
 if "reservation_pending" not in st.session_state:
     st.session_state.reservation_pending = False
@@ -11,7 +11,7 @@ if "reservation_pending" not in st.session_state:
 st.title("Cluster CPU/Memory/GPU Dashboard")
 
 try:
-    response = requests.get(f"{CENTRAL_DASHBOARD_URL}/api/list_nodes", timeout=5)
+    response = requests.get(f"{CENTRAL_CONTROLLER_URL}/api/list_nodes", timeout=5)
     data = response.json()
 except Exception as e:
     st.error(f"Failed to fetch node data: {e}")
@@ -37,7 +37,7 @@ with tabs[0]:
         if submit and user.strip():
             try:
                 r = requests.post(
-                    f"{CENTRAL_DASHBOARD_URL}/api/find_best_gpu",
+                    f"{CENTRAL_CONTROLLER_URL}/api/find_best_gpu",
                     json={
                         "user_name": user,
                         "mem_required": mem_required,
@@ -76,7 +76,7 @@ with tabs[0]:
         with col1:
             if st.button("Confirm Reservation"):
                 confirm = requests.post(
-                    f"{CENTRAL_DASHBOARD_URL}/api/reserve_gpu",
+                    f"{CENTRAL_CONTROLLER_URL}/api/reserve_gpu",
                     json={
                         "node_id": res["node_id"],
                         "gpu_id": res["gpu_id"],
