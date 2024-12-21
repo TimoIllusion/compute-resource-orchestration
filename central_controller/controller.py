@@ -14,6 +14,8 @@ app = FastAPI()
 node_data = {}
 node_reservations = {}
 
+MEMORY_BUFFER_PER_RESERVATION = 1.0  # 1GB buffer per reservation
+
 
 class GPUProcess(BaseModel):
     pid: int
@@ -30,10 +32,7 @@ class GPUInfo(BaseModel):
     max_mem: float
     mem_usage: float
     processes: List[GPUProcess]
-    reservations: List[GPUReservation] = []  # Changed from single reservation to list
-
-
-MEMORY_BUFFER_PER_RESERVATION = 1.0  # 1GB buffer per reservation
+    reservations: List[GPUReservation] = []
 
 
 class NodeStatusUpdate(BaseModel):
@@ -83,13 +82,11 @@ def reserve_gpu(req: ReservationRequest):
 
     gpu_info = node_data[req.node_id]["gpus"][req.gpu_id]
 
-    # Calculate total reserved memory including buffers
     total_reserved = sum(
         (r["mem_reserved"] + MEMORY_BUFFER_PER_RESERVATION)
         for r in gpu_info.get("reservations", [])
     )
 
-    # Check if adding this reservation would exceed GPU capacity
     if (
         total_reserved + req.mem_required + MEMORY_BUFFER_PER_RESERVATION
         > gpu_info["max_mem"]
@@ -98,7 +95,6 @@ def reserve_gpu(req: ReservationRequest):
             status_code=400, detail="Insufficient GPU memory for reservation"
         )
 
-    # Add new reservation
     if "reservations" not in gpu_info:
         gpu_info["reservations"] = []
     gpu_info["reservations"].append(
@@ -116,9 +112,6 @@ def reserve_gpu(req: ReservationRequest):
 
 @app.post("/api/finish_reservation")
 def finish_reservation(req: ReservationRequest):
-    """
-    Frees an active reservation and appends it to the node_reservations history.
-    """
     if req.node_id not in node_data:
         raise HTTPException(status_code=404, detail="Node not found")
     if req.gpu_id not in node_data[req.node_id]["gpus"]:
@@ -127,7 +120,6 @@ def finish_reservation(req: ReservationRequest):
     gpu_info = node_data[req.node_id]["gpus"][req.gpu_id]
     current_reservations = gpu_info.get("reservations", [])
 
-    # Find matching active reservation
     matching = [
         r
         for r in current_reservations
@@ -151,9 +143,6 @@ def finish_reservation(req: ReservationRequest):
 
 @app.get("/api/list_reservation_history")
 def list_reservation_history():
-    """
-    Returns the stored history of all freed (old) reservations.
-    """
     return node_reservations
 
 
@@ -189,7 +178,6 @@ def request_gpu(req: GPURequest):
             }
         )
         return {"status": "ok", "node_id": req.node_id, "gpu_id": req.gpu_id}
-
     return {"status": "error", "message": "No suitable GPU found"}
 
 
@@ -201,16 +189,18 @@ def find_best_gpu(req: FindGPURequest):
 
     for node_id, node_info in node_data.items():
         for gpu_id, gpu_info in node_info.get("gpus", {}).items():
-            # Calculate total reserved memory including buffers
+            # Skip any GPU that already has at least one reservation.
+            # This ensures if there is one user already reserving a GPU,
+            # we move on to a fresh GPU for another new user.
+            if len(gpu_info.get("reservations", [])) > 0:
+                continue
+
             total_reserved = sum(
                 (r["mem_reserved"] + MEMORY_BUFFER_PER_RESERVATION)
                 for r in gpu_info.get("reservations", [])
             )
-
-            # Calculate available memory
             available_mem = gpu_info["max_mem"] - total_reserved
 
-            # Check if this GPU has enough memory for the new reservation
             if (
                 available_mem >= (req.mem_required + MEMORY_BUFFER_PER_RESERVATION)
                 and available_mem > most_available_mem
