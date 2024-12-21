@@ -21,11 +21,19 @@ class GPUProcess(BaseModel):
     mem_usage: float
 
 
+class GPUReservation(BaseModel):
+    user: str
+    mem_reserved: float
+
+
 class GPUInfo(BaseModel):
     max_mem: float
     mem_usage: float
     processes: List[GPUProcess]
-    reservation: Optional[str] = None  # Add reservation field
+    reservations: List[GPUReservation] = []  # Changed from single reservation to list
+
+
+MEMORY_BUFFER_PER_RESERVATION = 1.0  # 1GB buffer per reservation
 
 
 class NodeStatusUpdate(BaseModel):
@@ -63,6 +71,7 @@ class ReservationRequest(BaseModel):
     node_id: str
     gpu_id: str
     user_name: str
+    mem_required: float
 
 
 @app.post("/api/reserve_gpu")
@@ -72,12 +81,36 @@ def reserve_gpu(req: ReservationRequest):
     if req.gpu_id not in node_data[req.node_id]["gpus"]:
         raise HTTPException(status_code=404, detail="GPU not found")
 
-    node_data[req.node_id]["gpus"][req.gpu_id]["reservation"] = req.user_name
+    gpu_info = node_data[req.node_id]["gpus"][req.gpu_id]
+
+    # Calculate total reserved memory including buffers
+    total_reserved = sum(
+        (r["mem_reserved"] + MEMORY_BUFFER_PER_RESERVATION)
+        for r in gpu_info.get("reservations", [])
+    )
+
+    # Check if adding this reservation would exceed GPU capacity
+    if (
+        total_reserved + req.mem_required + MEMORY_BUFFER_PER_RESERVATION
+        > gpu_info["max_mem"]
+    ):
+        raise HTTPException(
+            status_code=400, detail="Insufficient GPU memory for reservation"
+        )
+
+    # Add new reservation
+    if "reservations" not in gpu_info:
+        gpu_info["reservations"] = []
+    gpu_info["reservations"].append(
+        {"user": req.user_name, "mem_reserved": req.mem_required}
+    )
+
     return {
         "status": "reserved",
         "node_id": req.node_id,
         "gpu_id": req.gpu_id,
         "user": req.user_name,
+        "mem_reserved": req.mem_required,
     }
 
 
@@ -125,12 +158,20 @@ def find_best_gpu(req: FindGPURequest):
 
     for node_id, node_info in node_data.items():
         for gpu_id, gpu_info in node_info.get("gpus", {}).items():
-            # Skip if GPU is already reserved
-            if gpu_info.get("reservation"):
-                continue
+            # Calculate total reserved memory including buffers
+            total_reserved = sum(
+                (r["mem_reserved"] + MEMORY_BUFFER_PER_RESERVATION)
+                for r in gpu_info.get("reservations", [])
+            )
 
-            available_mem = gpu_info["max_mem"] - gpu_info["mem_usage"]
-            if available_mem >= req.mem_required and available_mem > most_available_mem:
+            # Calculate available memory
+            available_mem = gpu_info["max_mem"] - total_reserved
+
+            # Check if this GPU has enough memory for the new reservation
+            if (
+                available_mem >= (req.mem_required + MEMORY_BUFFER_PER_RESERVATION)
+                and available_mem > most_available_mem
+            ):
                 most_available_mem = available_mem
                 best_gpu = gpu_id
                 best_node = node_id

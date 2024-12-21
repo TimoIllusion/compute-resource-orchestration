@@ -25,7 +25,7 @@ def initialize_gpu_info():
             "max_mem": max_mem,
             "mem_usage": mem_usage,
             "processes": processes,
-            "reservation": None,
+            "reservations": [],  # Initialize empty reservations list
         }
     return gpus
 

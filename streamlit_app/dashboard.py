@@ -81,6 +81,7 @@ with tabs[0]:
                         "node_id": res["node_id"],
                         "gpu_id": res["gpu_id"],
                         "user_name": res["user_name"],
+                        "mem_required": res["mem_required"],  # Add memory requirement
                     },
                     timeout=5,
                 )
@@ -89,6 +90,8 @@ with tabs[0]:
                     st.session_state.pending_reservation = None
                     st.success("GPU Reserved successfully!")
                     st.rerun()
+                else:
+                    st.error(f"Failed to reserve GPU: {confirm.text}")
 
         with col2:
             if st.button("Cancel"):
@@ -110,16 +113,17 @@ with tabs[1]:
             for gpu_id, gpu_info in info.get("gpus", {}).items():
                 with gpu_container:
                     st.write(f"**GPU {gpu_id}:**")
-                    col_gpu_mem, col_reservation = st.columns([1, 1])
+                    col_gpu_mem, col_reservations = st.columns([1, 1])
                     with col_gpu_mem:
                         st.write(
                             f"Memory Usage: {gpu_info['mem_usage']:.2f} GB / {gpu_info['max_mem']:.2f} GB"
                         )
-                    with col_reservation:
-                        reservation = gpu_info.get("reservation", None)
-                        st.write(
-                            f"**Reserved By:** {reservation if reservation else 'None'}"
-                        )
+                    with col_reservations:
+                        st.write("**Reservations:**")
+                        for reservation in gpu_info.get("reservations", []):
+                            st.write(
+                                f"- {reservation['user']}: {reservation['mem_reserved']:.1f} GB"
+                            )
 
                     st.write("Processes:")
                     for process in gpu_info["processes"]:
