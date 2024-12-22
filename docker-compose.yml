@@ -1,44 +1,19 @@
-version: "3.8"
+version: "3.9"
+
 services:
-  central_controller:
-    build: ./central_controller
-    container_name: central_controller
-    ports:
-      - "8000:8000"
-    depends_on:
-      - node1_agent
-      - node2_agent
-    networks:
-      - cluster_net
-
-  node1_agent:
-    build: ./node_agent
-    container_name: node1_agent
-    environment:
-      - NODE_ID=node1
-      - CONTROLLER_URL=http://central_controller:8000
-    networks:
-      - cluster_net
-
-  node2_agent:
-    build: ./node_agent
-    container_name: node2_agent
-    environment:
-      - NODE_ID=node2
-      - CONTROLLER_URL=http://central_controller:8000
-    networks:
-      - cluster_net
-
   streamlit_app:
-    build: ./streamlit_app
+    build: .
     container_name: streamlit_app
     ports:
       - "8501:8501"
-    depends_on:
-      - central_controller
-    networks:
-      - cluster_net
-
-networks:
-  cluster_net:
-    driver: bridge
+    volumes:
+      # Mount the current folder inside the container
+      # so you can quickly update code without rebuilding (optional)
+      - .:/app
+    # If you want the SQLite DB to persist on the host system, you could do:
+    # - ./reservations.db:/app/reservations.db
+    environment:
+      # If you need environment variables
+      # - Example: "production", "dev", etc.
+      # - STREAMLIT_ENV=production
+      - PYTHONUNBUFFERED=1

@@ -1,0 +1,16 @@
+version: "3.9"
+
+services:
+  streamlit_dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: streamlit_dev
+    ports:
+      - "8501:8501"
+    volumes:
+      # This mounts your current directory on the host into /app in the container
+      - .:/app
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]

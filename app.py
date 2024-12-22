@@ -52,7 +52,7 @@ with tabs[0]:
                     "mem_required": mem_required,
                     "session_type": session_type,
                 }
-                st.experimental_rerun()
+                st.rerun()
             else:
                 st.error(response["message"])
 
@@ -77,7 +77,7 @@ with tabs[0]:
                     st.session_state.reservation_pending = False
                     st.session_state.pending_reservation = None
                     st.success("GPU Reserved successfully!")
-                    st.experimental_rerun()
+                    st.rerun()
                 else:
                     st.error(confirm["message"])
 
@@ -85,7 +85,7 @@ with tabs[0]:
             if st.button("Cancel"):
                 st.session_state.reservation_pending = False
                 st.session_state.pending_reservation = None
-                st.experimental_rerun()
+                st.rerun()
 
 
 # ---------------- Cluster Status Tab ----------------
@@ -96,7 +96,7 @@ with tabs[1]:
     if st.button("Reset All Reservations and Processes"):
         reset_cluster()
         st.success("All reservations and processes cleared!")
-        st.experimental_rerun()
+        st.rerun()
 
     data = list_nodes()
     for node_id, node_info in data.items():

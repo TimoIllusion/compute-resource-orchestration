@@ -12,6 +12,16 @@ docker-compose up --build
 docker-compose down
 ```
 
+## Development
+
+```bash
+docker compose -f docker-compose.dev.yml up --build
+```
+
+```bash
+docker compose -f docker-compose.dev.yml down
+```
+
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
