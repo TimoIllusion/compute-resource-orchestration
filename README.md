@@ -1,6 +1,6 @@
 # Compute Resource Orchestration
 
-Simple framework to monitor and manage multiple, heterogenous nodes of compute resources.
+Simple framework to monitor and manage multiple, heterogenous nodes of compute resources. For now, this is just using dummy data and is work in progress.
 
 ## Getting Started
 
