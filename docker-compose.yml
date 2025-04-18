@@ -11,14 +11,13 @@ services:
     restart: unless-stopped
     environment:
       - PYTHONUNBUFFERED=1
-      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-none}  # Set to none if no GPUs available
+    # Conditionally deploy GPU resources only if they're available
     deploy:
       resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+        limits:
+          cpus: '2'
+          memory: 2G
     
   frontend:
     build:
@@ -42,17 +41,10 @@ services:
     restart: unless-stopped
     environment:
       - PYTHONUNBUFFERED=1
-      - NVIDIA_VISIBLE_DEVICES=0
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-none}  # Set to none if no GPUs available
       - NODE_ID=node1
       - GPU_ID=0
       - BACKEND_URL=http://backend:8000
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["0"]
-              capabilities: [gpu]
     depends_on:
       - backend
       
@@ -64,16 +56,9 @@ services:
     restart: unless-stopped
     environment:
       - PYTHONUNBUFFERED=1
-      - NVIDIA_VISIBLE_DEVICES=0
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-none}  # Set to none if no GPUs available
       - NODE_ID=node1
-      - GPU_ID=0
+      - GPU_ID=1
       - BACKEND_URL=http://backend:8000
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["0"]
-              capabilities: [gpu]
     depends_on:
       - backend

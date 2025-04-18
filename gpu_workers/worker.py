@@ -1,30 +1,24 @@
 #!/usr/bin/env python3
 """
-GPU Worker Process
+Simplified GPU Worker Process
 
 This script runs on GPU worker containers and performs the following functions:
 1. Handles communication with the orchestration backend
-2. Runs configurable PyTorch workloads to simulate GPU usage
-3. Reports GPU metrics back to the backend
+2. Runs simple PyTorch workloads to simulate GPU usage
+3. Supports starting/stopping workloads via API
 """
 
 import os
 import time
-import json
-import signal
 import logging
 import threading
-import subprocess
 import uuid
-from typing import Dict, List, Any, Optional
+import json
+from typing import Dict, Any, Optional
 
 import torch
-import numpy as np
 import requests
-import pynvml
-import psutil
 from torch import nn
-import GPUtil
 
 # Configure logging
 logging.basicConfig(
@@ -36,7 +30,6 @@ logger = logging.getLogger("gpu_worker")
 NODE_ID = os.environ.get("NODE_ID", "node1")
 GPU_ID = os.environ.get("GPU_ID", "0")
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://backend:8000")
-DEV_MODE = os.environ.get("DEV_MODE", "0") == "1"
 UPDATE_INTERVAL = int(os.environ.get("UPDATE_INTERVAL", "5"))  # seconds
 
 # Global state
@@ -48,17 +41,28 @@ should_exit = threading.Event()
 class GPUProcess:
     """Represents a running GPU workload process."""
 
-    def __init__(self, process_id: str, memory_usage: float, duration: int = -1):
+    def __init__(
+        self,
+        process_id: str,
+        memory_usage: float = 1.0,
+        duration: int = -1,
+        custom_code: str = None,
+    ):
         self.process_id = process_id
-        self.memory_usage = memory_usage  # in GB
+        self.memory_usage = memory_usage  # in GB (approximate)
         self.duration = duration  # in seconds, -1 for indefinite
         self.start_time = time.time()
         self.thread = None
         self.is_running = False
+        self.custom_code = custom_code
 
     def start(self):
         """Start the GPU workload in a separate thread."""
-        self.thread = threading.Thread(target=self._run_workload)
+        if self.custom_code:
+            self.thread = threading.Thread(target=self._run_custom_workload)
+        else:
+            self.thread = threading.Thread(target=self._run_workload)
+
         self.is_running = True
         self.thread.start()
         return self.process_id
@@ -72,56 +76,53 @@ class GPUProcess:
         return False
 
     def _run_workload(self):
-        """Run a PyTorch workload that consumes the specified amount of GPU memory."""
+        """Run a simple PyTorch workload that uses the GPU."""
         try:
-            # Ensure GPU is available
-            if not torch.cuda.is_available():
-                logger.error(f"CUDA not available for process {self.process_id}")
-                return
+            # Check if GPU is available
+            if torch.cuda.is_available():
+                device = torch.device(f"cuda:{GPU_ID}")
+                logger.info(f"Starting process {self.process_id} on GPU {GPU_ID}")
 
-            # Set device
-            device = torch.device(f"cuda:{GPU_ID}")
-            logger.info(
-                f"Starting process {self.process_id} on GPU {GPU_ID} with {self.memory_usage}GB memory allocation"
-            )
+                # Create a matrix size based on the requested memory usage
+                # This is approximate - 1GB is roughly 268 million float32 elements
+                # A square matrix would be about 16K x 16K for 1GB
+                matrix_size = int(4000 * (self.memory_usage**0.5))
 
-            # Allocate memory - each float32 is 4 bytes
-            # Convert GB to bytes and calculate number of elements needed
-            num_elements = int((self.memory_usage * 1024 * 1024 * 1024) / 4)
+                # Create tensors for matrix multiplication
+                a = torch.rand(matrix_size, matrix_size, device=device)
+                b = torch.rand(matrix_size, matrix_size, device=device)
 
-            # Create tensors that will consume the specified amount of memory
-            x = torch.rand(num_elements, device=device)
+                end_time = (
+                    time.time() + self.duration if self.duration > 0 else float("inf")
+                )
 
-            # Create a simple model for computation
-            model = nn.Sequential(
-                nn.Linear(100, 200),
-                nn.ReLU(),
-                nn.Linear(200, 100),
-                nn.ReLU(),
-            ).to(device)
+                # Run matrix multiplications until stopped
+                while self.is_running and time.time() < end_time:
+                    # Matrix multiplication
+                    c = torch.matmul(a, b)
 
-            end_time = (
-                time.time() + self.duration if self.duration > 0 else float("inf")
-            )
+                    # Do something with the result to avoid optimization
+                    a = a * 0.999 + torch.rand(1, device=device) * 0.001
 
-            # Run computations until stopped or duration expires
-            while self.is_running and time.time() < end_time:
-                # Create random input for the model
-                inputs = torch.rand(32, 100, device=device)
+                    # Add a small sleep to avoid maxing out the GPU
+                    time.sleep(0.5)
 
-                # Run forward pass
-                outputs = model(inputs)
+            else:
+                logger.warning(
+                    f"CUDA not available for process {self.process_id}, running dummy CPU workload"
+                )
 
-                # Run some matrix operations to simulate computation
-                for _ in range(100):
-                    y = torch.matmul(outputs, torch.rand_like(outputs))
-                    z = torch.nn.functional.relu(y)
+                # Run a CPU-based loop if GPU is not available
+                end_time = (
+                    time.time() + self.duration if self.duration > 0 else float("inf")
+                )
 
-                # Update tensor to prevent optimization
-                x = x * 0.999 + torch.rand(1, device=device) * 0.001
-
-                # Simulate some computation time
-                time.sleep(0.1)
+                while self.is_running and time.time() < end_time:
+                    # Just do some CPU work
+                    a = torch.rand(1000, 1000)
+                    b = torch.rand(1000, 1000)
+                    c = torch.matmul(a, b)
+                    time.sleep(1.0)
 
             logger.info(f"Process {self.process_id} completed")
 
@@ -130,105 +131,59 @@ class GPUProcess:
         finally:
             self.is_running = False
 
-
-def get_gpu_metrics() -> Dict[str, Any]:
-    """Get current GPU metrics using pynvml."""
-    try:
-        # Initialize pynvml
-        pynvml.nvmlInit()
-
-        # Get handle to the GPU
-        handle = pynvml.nvmlDeviceGetHandleByIndex(int(GPU_ID))
-
-        # Get memory info
-        mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-        total_mem = mem_info.total / (1024 * 1024 * 1024)  # Convert to GB
-        used_mem = mem_info.used / (1024 * 1024 * 1024)  # Convert to GB
-        free_mem = mem_info.free / (1024 * 1024 * 1024)  # Convert to GB
-
-        # Get utilization rates
-        utilization = pynvml.nvmlDeviceGetUtilizationRates(handle)
-        gpu_util = utilization.gpu  # GPU utilization percentage
-        mem_util = utilization.memory  # Memory utilization percentage
-
-        # Get temperature
-        temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
-
-        # Get power usage if available
+    def _run_custom_workload(self):
+        """Run a custom PyTorch workload from provided code string."""
         try:
-            power = pynvml.nvmlDeviceGetPowerUsage(handle) / 1000.0  # Convert to W
-        except pynvml.NVMLError:
-            power = 0.0
-
-        # Get processes running on the GPU
-        processes = []
-        try:
-            proc_info = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
-            for proc in proc_info:
-                pid = proc.pid
-                used_mem_proc = proc.usedGpuMemory / (
-                    1024 * 1024 * 1024
-                )  # Convert to GB
-
-                # Try to get process name
-                try:
-                    p = psutil.Process(pid)
-                    process_name = p.name()
-                    cmd_line = " ".join(p.cmdline())
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    process_name = "Unknown"
-                    cmd_line = "Unknown"
-
-                processes.append(
-                    {
-                        "pid": pid,
-                        "name": process_name,
-                        "command": cmd_line,
-                        "memory_usage": used_mem_proc,
-                    }
+            if torch.cuda.is_available():
+                device = torch.device(f"cuda:{GPU_ID}")
+                logger.info(
+                    f"Starting custom process {self.process_id} on GPU {GPU_ID}"
                 )
-        except pynvml.NVMLError:
-            pass
 
-        pynvml.nvmlShutdown()
+                # Set up the execution environment
+                local_vars = {
+                    "torch": torch,
+                    "nn": nn,
+                    "device": device,
+                    "is_running": lambda: self.is_running,
+                    "process_id": self.process_id,
+                    "logger": logger,
+                }
 
-        return {
-            "node_id": NODE_ID,
-            "gpu_id": GPU_ID,
-            "timestamp": time.time(),
-            "memory": {"total": total_mem, "used": used_mem, "free": free_mem},
-            "utilization": {"gpu": gpu_util, "memory": mem_util},
-            "temperature": temp,
-            "power": power,
-            "processes": processes,
-        }
+                # Execute the custom code in the prepared environment
+                try:
+                    exec(self.custom_code, {}, local_vars)
+                except Exception as e:
+                    logger.error(f"Error in custom code execution: {e}")
+            else:
+                logger.warning(
+                    f"CUDA not available for custom process {self.process_id}"
+                )
 
-    except Exception as e:
-        logger.error(f"Error getting GPU metrics: {e}")
-        # Return fallback metrics
-        return {
-            "node_id": NODE_ID,
-            "gpu_id": GPU_ID,
-            "timestamp": time.time(),
-            "memory": {"total": 0.0, "used": 0.0, "free": 0.0},
-            "utilization": {"gpu": 0, "memory": 0},
-            "temperature": 0,
-            "power": 0.0,
-            "processes": [],
-        }
+        except Exception as e:
+            logger.error(f"Error in custom process {self.process_id}: {e}")
+        finally:
+            self.is_running = False
 
 
-def report_metrics():
-    """Report GPU metrics to the backend."""
+def report_status():
+    """Report worker status to the backend."""
     while not should_exit.is_set():
         try:
-            metrics = get_gpu_metrics()
+            # Gather basic worker and process status
+            status = {
+                "worker_id": worker_id,
+                "node_id": NODE_ID,
+                "gpu_id": GPU_ID,
+                "timestamp": time.time(),
+                "cuda_available": torch.cuda.is_available(),
+                "processes": [],
+            }
 
-            # Add information about our managed processes
-            managed_procs = []
+            # Add information about running processes
             for proc_id, process in running_processes.items():
                 if process.is_running:
-                    managed_procs.append(
+                    status["processes"].append(
                         {
                             "process_id": proc_id,
                             "memory_allocated": process.memory_usage,
@@ -237,36 +192,37 @@ def report_metrics():
                         }
                     )
 
-            metrics["managed_processes"] = managed_procs
-
-            # Send metrics to backend
+            # Send status to backend
             response = requests.post(
-                f"{BACKEND_URL}/gpu_metrics",
-                json=metrics,
+                f"{BACKEND_URL}/worker_status",
+                json=status,
                 headers={"Content-Type": "application/json"},
             )
 
             if response.status_code == 200:
-                logger.debug("Metrics reported successfully")
+                logger.debug("Status reported successfully")
             else:
-                logger.warning(f"Failed to report metrics: {response.status_code}")
+                logger.warning(f"Failed to report status: {response.status_code}")
 
         except Exception as e:
-            logger.error(f"Error reporting metrics: {e}")
+            logger.error(f"Error reporting status: {e}")
 
         # Wait for the next update interval
         time.sleep(UPDATE_INTERVAL)
 
 
-def start_process_handler(memory_usage: float, duration_minutes: int = -1) -> str:
-    """Start a new GPU process with specified memory usage."""
+def start_process_handler(
+    memory_usage: float = 1.0, duration_minutes: int = -1, custom_code: str = None
+) -> str:
+    """Start a new GPU process."""
     process_id = f"proc_{str(uuid.uuid4())[:8]}"
     duration_seconds = duration_minutes * 60 if duration_minutes > 0 else -1
 
-    process = GPUProcess(process_id, memory_usage, duration_seconds)
+    process = GPUProcess(process_id, memory_usage, duration_seconds, custom_code)
     process.start()
 
     running_processes[process_id] = process
+    logger.info(f"Started process {process_id}")
     return process_id
 
 
@@ -275,6 +231,7 @@ def stop_process_handler(process_id: str) -> bool:
     if process_id in running_processes:
         success = running_processes[process_id].stop()
         if success:
+            logger.info(f"Stopped process {process_id}")
             del running_processes[process_id]
         return success
     return False
@@ -301,13 +258,16 @@ def register_with_backend():
             "worker_id": worker_id,
             "node_id": NODE_ID,
             "gpu_id": GPU_ID,
+            "cuda_available": torch.cuda.is_available(),
             "capabilities": {
-                "cuda_version": torch.version.cuda,
                 "torch_version": torch.__version__,
-                "compute_capability": (
-                    torch.cuda.get_device_capability(int(GPU_ID))
+                "cuda_version": (
+                    torch.version.cuda if torch.cuda.is_available() else "N/A"
+                ),
+                "device_name": (
+                    torch.cuda.get_device_name(int(GPU_ID))
                     if torch.cuda.is_available()
-                    else None
+                    else "CPU only"
                 ),
             },
         }
@@ -330,19 +290,98 @@ def register_with_backend():
         return False
 
 
-def start_dummy_workloads():
-    """Start some dummy workloads for demonstration purposes in dev mode."""
-    if DEV_MODE:
-        logger.info("Starting dummy workloads for demonstration")
-        # Start a small workload (1GB) that runs for 10 minutes
-        start_process_handler(1.0, 10)
-        time.sleep(2)  # Wait to ensure first process starts
-        # Start a medium workload (2GB) that runs indefinitely
-        start_process_handler(2.0, -1)
+def start_api_server():
+    """Start a simple HTTP server to handle commands."""
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+    import json
+
+    class CommandHandler(BaseHTTPRequestHandler):
+        def _set_response(self, status_code=200, content_type="application/json"):
+            self.send_response(status_code)
+            self.send_header("Content-type", content_type)
+            self.end_headers()
+
+        def do_POST(self):
+            content_length = int(self.headers["Content-Length"])
+            post_data = self.rfile.read(content_length)
+
+            try:
+                data = json.loads(post_data.decode("utf-8"))
+
+                if self.path == "/start_process":
+                    memory_usage = data.get("memory_usage", 1.0)
+                    duration_minutes = data.get("duration_minutes", -1)
+                    custom_code = data.get("custom_code", None)
+
+                    process_id = start_process_handler(
+                        memory_usage, duration_minutes, custom_code
+                    )
+                    response = {"status": "success", "process_id": process_id}
+                    self._set_response()
+                    self.wfile.write(json.dumps(response).encode("utf-8"))
+
+                elif self.path == "/stop_process":
+                    process_id = data.get("process_id")
+
+                    if process_id:
+                        success = stop_process_handler(process_id)
+                        response = {"status": "success" if success else "failed"}
+                    else:
+                        response = {"status": "failed", "error": "Missing process_id"}
+
+                    self._set_response()
+                    self.wfile.write(json.dumps(response).encode("utf-8"))
+
+                else:
+                    self._set_response(404)
+                    self.wfile.write(json.dumps({"error": "Not found"}).encode("utf-8"))
+
+            except Exception as e:
+                logger.error(f"Error handling request: {e}")
+                self._set_response(500)
+                self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))
+
+        def do_GET(self):
+            if self.path == "/status":
+                status = {
+                    "worker_id": worker_id,
+                    "node_id": NODE_ID,
+                    "gpu_id": GPU_ID,
+                    "cuda_available": torch.cuda.is_available(),
+                    "processes": [],
+                }
+
+                for proc_id, process in running_processes.items():
+                    if process.is_running:
+                        status["processes"].append(
+                            {
+                                "process_id": proc_id,
+                                "runtime": time.time() - process.start_time,
+                                "memory_allocated": process.memory_usage,
+                            }
+                        )
+
+                self._set_response()
+                self.wfile.write(json.dumps(status).encode("utf-8"))
+            else:
+                self._set_response(404)
+                self.wfile.write(json.dumps({"error": "Not found"}).encode("utf-8"))
+
+    # Start the server in a separate thread
+    server_address = ("", 8001)  # Different port from the backend
+    httpd = HTTPServer(server_address, CommandHandler)
+
+    server_thread = threading.Thread(target=httpd.serve_forever)
+    server_thread.daemon = True
+    server_thread.start()
+
+    logger.info(f"API server started on port 8001")
 
 
 def main():
     """Main entry point for the worker."""
+    import signal
+
     # Register signal handlers
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
@@ -355,9 +394,9 @@ def main():
             f"CUDA is available, detected: {torch.cuda.get_device_name(int(GPU_ID))}"
         )
     else:
-        logger.warning("CUDA is not available! Running in limited mode.")
+        logger.warning("CUDA is not available! Running in CPU-only mode.")
 
-    # Try to register with backend
+    # Register with backend
     retry_count = 0
     while retry_count < 5 and not register_with_backend():
         logger.info(
@@ -366,15 +405,15 @@ def main():
         time.sleep(5)
         retry_count += 1
 
-    # Start metrics reporting thread
-    metrics_thread = threading.Thread(target=report_metrics)
-    metrics_thread.daemon = True
-    metrics_thread.start()
+    # Start status reporting thread
+    status_thread = threading.Thread(target=report_status)
+    status_thread.daemon = True
+    status_thread.start()
 
-    # Start dummy workloads in dev mode
-    start_dummy_workloads()
+    # Start API server to receive commands
+    start_api_server()
 
-    # Main loop - check for terminated processes and clean them up
+    # Main loop - check for terminated processes
     try:
         while not should_exit.is_set():
             for proc_id in list(running_processes.keys()):
@@ -392,8 +431,8 @@ def main():
         logger.info("Shutting down worker...")
         should_exit.set()
         cleanup()
-        if metrics_thread.is_alive():
-            metrics_thread.join(timeout=5.0)
+        if status_thread.is_alive():
+            status_thread.join(timeout=5.0)
 
 
 if __name__ == "__main__":
