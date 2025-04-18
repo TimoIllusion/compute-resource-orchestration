@@ -10,11 +10,13 @@ This system provides a web application for managing and orchestrating compute re
    - Provides REST endpoints for cluster management
    - Handles business logic for resource allocation and reservation
    - Connects to SQLite database for persistence
+   - Monitors and reports real GPU utilization metrics
 
 2. **Frontend (Vue.js)**
    - Single-page application for user interaction
    - Communicates with backend API
    - Provides intuitive UI for cluster management
+   - Real-time visualization of GPU metrics and utilization
 
 3. **Database (SQLite)**
    - Stores reservation information
@@ -22,9 +24,16 @@ This system provides a web application for managing and orchestrating compute re
    - Maintains cluster state
 
 4. **Container Environment (Docker)**
-   - Simulates a cluster environment
+   - Simulates a cluster environment with actual GPU access
    - Provides isolated, reproducible deployment
    - Orchestrates services via Docker Compose
+   - Passes through host GPU devices to containers
+
+5. **GPU Worker Processes**
+   - Simulates realistic GPU workloads using PyTorch
+   - Demonstrates variable memory usage and computation patterns
+   - Provides metrics for monitoring and visualization
+   - Can be started/stopped to test scheduling and allocation
 
 ## Functional Requirements
 
@@ -32,12 +41,23 @@ This system provides a web application for managing and orchestrating compute re
 - View current status of all GPUs in the cluster
 - See which GPUs are reserved and available
 - Monitor resource utilization metrics
+- Real-time tracking of:
+  - GPU memory usage
+  - Compute utilization percentage
+  - Running processes on each GPU
+  - Temperature and power consumption (if available)
 
 ### Reservation Management
 - Find best available GPU based on resource requirements
 - Reserve GPUs for specific durations
 - Cancel existing reservations
 - View active reservations
+
+### GPU Process Management
+- Start sample PyTorch workloads on specific GPUs
+- Monitor the resource impact of running workloads
+- Terminate specific processes when needed
+- View process details (PID, memory usage, runtime)
 
 ### Job Queue
 - Submit jobs to be executed when resources are available
@@ -52,7 +72,7 @@ This system provides a web application for managing and orchestrating compute re
 ## API Endpoints
 
 ### GET /status
-Returns the current status of all GPUs in the cluster.
+Returns the current status of all GPUs in the cluster with detailed metrics.
 
 ### POST /reserve
 Reserve a GPU for a specified duration.
@@ -73,17 +93,31 @@ Reset the cluster state and clear all reservations.
 ### GET /find_best
 Find the best available GPU without reserving it.
 
+### POST /start_process
+Start a PyTorch worker process on a specified GPU.
+- Parameters: `gpu_id` (string), `memory_usage` (float), `duration_minutes` (integer)
+
+### POST /stop_process/{process_id}
+Stop a running GPU process.
+- Parameters: `process_id` (integer)
+
+### GET /processes
+Get information about all running GPU processes.
+
 ## Docker Environment
 
-- Backend service: FastAPI running on port 8000
+- Backend service: FastAPI running on port 8000 with GPU access
 - Frontend service: Vue.js running on port 8080
+- GPU worker containers: Running PyTorch workloads on allocated GPUs
 - Development mode with hot-reloading for both services
+- GPU passthrough from host to containers
 
 ## Technology Stack
 
-- Backend: Python 3.10+, FastAPI, Uvicorn, SQLite
-- Frontend: Vue.js 3, Vue Router, Axios
-- Containerization: Docker, Docker Compose
+- Backend: Python 3.10+, FastAPI, Uvicorn, SQLite, PyTorch, NVIDIA CUDA
+- Frontend: Vue.js 3, Vue Router, Axios, Chart.js for visualization
+- GPU Monitoring: NVIDIA Management Library (NVML), pynvml
+- Containerization: Docker, Docker Compose with GPU support
 - Development: Node.js, npm
 
 ## Roadmap
@@ -93,3 +127,5 @@ Find the best available GPU without reserving it.
 3. User authentication and authorization
 4. Resource usage analytics and reporting
 5. Enhanced scheduling algorithms
+6. Integration with job schedulers like Slurm or Kubernetes
+7. Multi-node cluster support

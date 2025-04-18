@@ -9,16 +9,18 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      # This mounts your current directory on the host into /app in the container
-      - .:/app
-      # Exclude the frontend directory to avoid copying unnecessary files
-      - /app/frontend
-      # Exclude the node_modules directory if it exists in the root
-      - /app/node_modules
+      - .:/app  # Mount current directory for hot reloading
     environment:
       - PYTHONUNBUFFERED=1
-    # Override the CMD in Dockerfile to use auto-reload for development
-    command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+      - NVIDIA_VISIBLE_DEVICES=all
+    command: uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     
   frontend:
     build:
@@ -28,14 +30,59 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./frontend:/app
-      # Don't sync node_modules between host and container
-      - /app/node_modules
+      - ./frontend:/app  # Mount for hot reloading
+      - /app/node_modules  # Don't mount local node_modules
     environment:
       - NODE_ENV=development
-      # Point the Vue app to the backend API
       - VITE_API_URL=http://localhost:8000
-    # Hot reload is enabled by default in the Vue dev server
-    command: ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
+    command: npm run dev
+
+  gpu_worker_1:
+    build:
+      context: ./gpu_workers
+      dockerfile: Dockerfile
+    container_name: gpu_worker_1
+    restart: unless-stopped
+    volumes:
+      - ./gpu_workers:/app  # Mount for easier development
+    environment:
+      - PYTHONUNBUFFERED=1
+      - NVIDIA_VISIBLE_DEVICES=0
+      - NODE_ID=node1
+      - GPU_ID=0
+      - DEV_MODE=1
+      - BACKEND_URL=http://backend:8000
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
+    depends_on:
+      - backend
+      
+  gpu_worker_2:
+    build:
+      context: ./gpu_workers
+      dockerfile: Dockerfile
+    container_name: gpu_worker_2
+    restart: unless-stopped
+    volumes:
+      - ./gpu_workers:/app  # Mount for easier development
+    environment:
+      - PYTHONUNBUFFERED=1
+      - NVIDIA_VISIBLE_DEVICES=1
+      - NODE_ID=node1
+      - GPU_ID=1
+      - DEV_MODE=1
+      - BACKEND_URL=http://backend:8000
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["1"]
+              capabilities: [gpu]
     depends_on:
       - backend

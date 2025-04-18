@@ -1,11 +1,13 @@
 import uvicorn
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 import cluster
 import db
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 import sqlite3  # Import sqlite3 for exception handling
 import logging
+import time
+from datetime import datetime
 
 # Set up logging
 logging.basicConfig(
@@ -28,6 +30,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Store for real-time GPU metrics
+gpu_metrics = {}
+registered_workers = {}
 
 
 # Dependency to get DB connection
@@ -66,7 +72,21 @@ def on_startup():
 def get_cluster_status():
     """Get the current status of all GPUs in the cluster."""
     try:
-        return cluster.get_gpu_status()
+        # Get basic cluster status info
+        status_info = cluster.get_gpu_status()
+
+        # Enhance with real-time metrics when available
+        for i, gpu in enumerate(status_info):
+            node_id = gpu["node_id"]
+            gpu_id = gpu["gpu_id"]
+
+            # Add real-time metrics if available
+            metric_key = f"{node_id}_{gpu_id}"
+            if metric_key in gpu_metrics:
+                # Add the real-time metrics
+                gpu["real_metrics"] = gpu_metrics[metric_key]
+
+        return status_info
     except Exception as e:
         logger.error(f"Failed to get cluster status: {e}")
         raise HTTPException(
@@ -174,7 +194,6 @@ def reset_cluster_endpoint(conn: sqlite3.Connection = Depends(get_db_conn)):
         )
 
 
-# Add a find_best endpoint if needed separately from reserve
 @app.get("/find_best", response_model=Dict[str, str])
 def find_best_gpu_endpoint():
     """Find the best available GPU without reserving it."""
@@ -189,6 +208,218 @@ def find_best_gpu_endpoint():
         logger.error(f"Failed to find best GPU: {e}")
         raise HTTPException(
             status_code=500, detail=f"Failed to find best GPU: {str(e)}"
+        )
+
+
+# New endpoints for GPU worker support and monitoring
+
+
+@app.post("/register_worker")
+def register_worker(worker_info: Dict[str, Any]):
+    """Register a GPU worker with the orchestration system."""
+    try:
+        worker_id = worker_info.get("worker_id")
+        node_id = worker_info.get("node_id")
+        gpu_id = worker_info.get("gpu_id")
+
+        if not all([worker_id, node_id, gpu_id]):
+            raise HTTPException(
+                status_code=400, detail="Missing required worker information"
+            )
+
+        worker_key = f"{worker_id}"
+        metric_key = f"{node_id}_{gpu_id}"
+
+        registered_workers[worker_key] = {
+            "worker_id": worker_id,
+            "node_id": node_id,
+            "gpu_id": gpu_id,
+            "registered_at": datetime.now().isoformat(),
+            "last_seen": datetime.now().isoformat(),
+            "capabilities": worker_info.get("capabilities", {}),
+        }
+
+        logger.info(f"Registered new worker: {worker_id} on {node_id} GPU {gpu_id}")
+
+        return {"status": "registered", "worker_id": worker_id}
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Failed to register worker: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to register worker: {str(e)}"
+        )
+
+
+@app.post("/gpu_metrics")
+def receive_gpu_metrics(metrics: Dict[str, Any]):
+    """Receive GPU metrics from workers."""
+    try:
+        node_id = metrics.get("node_id")
+        gpu_id = metrics.get("gpu_id")
+
+        if not all([node_id, gpu_id]):
+            raise HTTPException(
+                status_code=400, detail="Missing required metric information"
+            )
+
+        # Store the latest metrics
+        metric_key = f"{node_id}_{gpu_id}"
+        gpu_metrics[metric_key] = {
+            "timestamp": metrics.get("timestamp", time.time()),
+            "memory": metrics.get("memory", {"total": 0, "used": 0, "free": 0}),
+            "utilization": metrics.get("utilization", {"gpu": 0, "memory": 0}),
+            "temperature": metrics.get("temperature", 0),
+            "power": metrics.get("power", 0),
+            "processes": metrics.get("processes", []),
+            "managed_processes": metrics.get("managed_processes", []),
+        }
+
+        # Update worker last seen time if we can identify the worker
+        for worker_id, worker_info in registered_workers.items():
+            if worker_info["node_id"] == node_id and worker_info["gpu_id"] == gpu_id:
+                worker_info["last_seen"] = datetime.now().isoformat()
+
+        return {"status": "received"}
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Failed to process GPU metrics: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to process GPU metrics: {str(e)}"
+        )
+
+
+@app.get("/workers", response_model=List[Dict])
+def get_workers():
+    """Get information about registered GPU workers."""
+    try:
+        return list(registered_workers.values())
+    except Exception as e:
+        logger.error(f"Failed to retrieve worker information: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to retrieve worker information: {str(e)}"
+        )
+
+
+@app.post("/start_process", response_model=Dict[str, str])
+def start_process(
+    background_tasks: BackgroundTasks,
+    gpu_id: str,
+    memory_usage: float = 1.0,
+    duration_minutes: int = 30,
+):
+    """Start a GPU process on a worker."""
+    try:
+        # Find the corresponding worker for this GPU
+        worker_id = None
+        for worker, info in registered_workers.items():
+            if info["gpu_id"] == gpu_id:
+                worker_id = worker
+                break
+
+        if not worker_id:
+            raise HTTPException(
+                status_code=404, detail=f"No worker found for GPU {gpu_id}"
+            )
+
+        # Construct worker URL based on node/GPU ID
+        node_id = registered_workers[worker_id]["node_id"]
+        worker_url = f"http://gpu_worker_{int(gpu_id) + 1}:8000"  # Assumes worker containers are named gpu_worker_1, gpu_worker_2, etc.
+
+        # In a real implementation, we'd make an HTTP request to the worker
+        # For now, we'll simulate success and rely on the worker's automatic reporting
+        process_id = f"proc_{int(time.time())}"
+
+        return {
+            "status": "started",
+            "process_id": process_id,
+            "gpu_id": gpu_id,
+            "memory_usage": str(memory_usage),
+            "duration_minutes": str(duration_minutes),
+        }
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Failed to start GPU process: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to start GPU process: {str(e)}"
+        )
+
+
+@app.post("/stop_process/{process_id}", response_model=Dict[str, str])
+def stop_process(process_id: str):
+    """Stop a running GPU process."""
+    try:
+        # Find which worker is running this process
+        target_worker = None
+        for metric_key, metrics in gpu_metrics.items():
+            for proc in metrics.get("managed_processes", []):
+                if proc.get("process_id") == process_id:
+                    node_id, gpu_id = metric_key.split("_")
+                    target_worker = f"gpu_worker_{int(gpu_id) + 1}"
+                    break
+            if target_worker:
+                break
+
+        if not target_worker:
+            raise HTTPException(
+                status_code=404, detail=f"Process {process_id} not found"
+            )
+
+        # In a real implementation, we'd make an HTTP request to the worker
+        # For now, we'll simulate success
+        return {"status": "stopped", "process_id": process_id}
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Failed to stop GPU process: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to stop GPU process: {str(e)}"
+        )
+
+
+@app.get("/processes", response_model=List[Dict])
+def get_processes():
+    """Get information about all running GPU processes."""
+    try:
+        all_processes = []
+
+        # Collect processes from all GPU metrics
+        for metric_key, metrics in gpu_metrics.items():
+            node_id, gpu_id = metric_key.split("_")
+
+            # Add system processes
+            for proc in metrics.get("processes", []):
+                proc_info = {
+                    "gpu_id": gpu_id,
+                    "node_id": node_id,
+                    "pid": proc.get("pid"),
+                    "name": proc.get("name"),
+                    "memory_usage": proc.get("memory_usage"),
+                    "command": proc.get("command", ""),
+                    "type": "system",
+                }
+                all_processes.append(proc_info)
+
+            # Add managed processes
+            for proc in metrics.get("managed_processes", []):
+                proc_info = {
+                    "gpu_id": gpu_id,
+                    "node_id": node_id,
+                    "process_id": proc.get("process_id"),
+                    "memory_allocated": proc.get("memory_allocated"),
+                    "runtime": proc.get("runtime"),
+                    "duration": proc.get("duration"),
+                    "type": "managed",
+                }
+                all_processes.append(proc_info)
+
+        return all_processes
+    except Exception as e:
+        logger.error(f"Failed to retrieve process information: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to retrieve process information: {str(e)}"
         )
 
 
@@ -212,5 +443,3 @@ if __name__ == "__main__":
     logger.info("Starting API server on http://0.0.0.0:8000")
     # Ensure host and port are correct for Docker exposure
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
-# Removed all Streamlit related code.

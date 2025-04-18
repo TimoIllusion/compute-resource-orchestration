@@ -13,73 +13,191 @@
     <div v-else>
       <div class="actions">
         <button @click="refreshClusterStatus" class="btn refresh-btn">
-          Refresh Status
+          <i class="fas fa-sync"></i> Refresh Status
         </button>
         <button @click="resetCluster" class="btn reset-btn" :disabled="isResetting">
-          Reset Cluster
+          <i class="fas fa-redo"></i> Reset Cluster
         </button>
       </div>
       
       <div class="gpus-container">
-        <div class="gpu-card" v-for="gpu in gpuStatus" :key="gpu.id" :class="{ 'gpu-reserved': gpu.reserved }">
+        <div class="gpu-card" v-for="gpu in gpuStatus" :key="`${gpu.node_id}_${gpu.gpu_id}`" 
+             :class="{ 'gpu-reserved': isGpuReserved(gpu) }">
           <div class="gpu-header">
-            <h3>GPU {{ gpu.id }}</h3>
-            <span class="gpu-status" :class="gpu.reserved ? 'status-reserved' : 'status-available'">
-              {{ gpu.reserved ? 'Reserved' : 'Available' }}
+            <h3>{{ gpu.node_id }} - GPU {{ gpu.gpu_id }}</h3>
+            <span class="gpu-status" :class="isGpuReserved(gpu) ? 'status-reserved' : 'status-available'">
+              {{ isGpuReserved(gpu) ? 'Reserved' : 'Available' }}
             </span>
+          </div>
+          
+          <!-- Memory usage visualization -->
+          <div class="memory-bar">
+            <div class="memory-label">Memory Usage:</div>
+            <div class="memory-progress">
+              <div class="memory-used" :style="{ width: getMemoryUsagePercent(gpu) + '%' }"></div>
+            </div>
+            <div class="memory-text">
+              {{ getMemoryUsed(gpu) }} / {{ getMemoryTotal(gpu) }} GB
+            </div>
           </div>
           
           <div class="gpu-info">
             <div class="info-row">
-              <span class="label">Memory:</span>
-              <span class="value">{{ gpu.memory }} GB</span>
+              <span class="label">Utilization:</span>
+              <span class="value">{{ getGpuUtilization(gpu) }}%</span>
             </div>
             <div class="info-row">
-              <span class="label">Utilization:</span>
-              <span class="value">{{ gpu.utilization }}%</span>
+              <span class="label">Temperature:</span>
+              <span class="value">{{ getGpuTemperature(gpu) }}°C</span>
             </div>
-            <div class="info-row" v-if="gpu.reserved">
+            <div class="info-row" v-if="getGpuPower(gpu) > 0">
+              <span class="label">Power:</span>
+              <span class="value">{{ getGpuPower(gpu) }} W</span>
+            </div>
+            <div class="info-row" v-if="isGpuReserved(gpu)">
               <span class="label">Reserved by:</span>
-              <span class="value">{{ gpu.user || 'Unknown' }}</span>
+              <span class="value">{{ getReservationUser(gpu) || 'Unknown' }}</span>
             </div>
-            <div class="info-row" v-if="gpu.reserved">
+            <div class="info-row" v-if="isGpuReserved(gpu)">
               <span class="label">Until:</span>
-              <span class="value">{{ formatTime(gpu.end_time) }}</span>
+              <span class="value">{{ formatTime(getReservationEndTime(gpu)) }}</span>
             </div>
           </div>
           
+          <div v-if="hasRunningProcesses(gpu)" class="processes-section">
+            <h4>Running Processes</h4>
+            <div class="process" v-for="(process, index) in getRunningProcesses(gpu)" :key="index">
+              <div class="process-header">
+                <div>{{ process.name || 'Process' }} {{ process.pid ? `(PID: ${process.pid})` : '' }}</div>
+                <div class="process-memory">{{ process.memory_usage || process.memory_allocated || 0 }} GB</div>
+              </div>
+              <div class="process-info" v-if="process.type === 'managed'">
+                Runtime: {{ formatDuration(process.runtime || 0) }}
+              </div>
+            </div>
+          </div>
+
           <div class="gpu-actions">
             <button 
-              v-if="!gpu.reserved" 
-              @click="reserveGpu(gpu.id)" 
+              v-if="!isGpuReserved(gpu)"
+              @click="reserveGpu(gpu.gpu_id)"
               class="btn reserve-btn"
               :disabled="isReserving"
             >
-              Reserve
+              <i class="fas fa-lock"></i> Reserve
+            </button>
+
+            <button 
+              v-if="canStartProcess(gpu)"
+              @click="startProcess(gpu.gpu_id)"
+              class="btn process-btn"
+              :disabled="isProcessing"
+            >
+              <i class="fas fa-play"></i> Start Process
             </button>
           </div>
         </div>
+      </div>
+      
+      <!-- Process Management Section -->
+      <div class="processes-management" v-if="allProcesses.length > 0">
+        <h2>All Running Processes</h2>
+        <table class="processes-table">
+          <thead>
+            <tr>
+              <th>Process ID</th>
+              <th>GPU</th>
+              <th>Memory Usage</th>
+              <th>Runtime</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="process in allProcesses" :key="process.process_id || process.pid">
+              <td>{{ process.process_id || process.pid }}</td>
+              <td>{{ process.node_id }}-{{ process.gpu_id }}</td>
+              <td>{{ process.memory_usage || process.memory_allocated || 0 }} GB</td>
+              <td>{{ process.runtime ? formatDuration(process.runtime) : 'N/A' }}</td>
+              <td>
+                <button 
+                  v-if="process.type === 'managed'"
+                  @click="stopProcess(process.process_id)" 
+                  class="btn stop-btn"
+                  :disabled="isProcessing"
+                >
+                  Stop
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
       </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, onBeforeUnmount, computed } from 'vue';
 
 // API URL from environment variable
 const apiBaseUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 // Reactive state
 const gpuStatus = ref([]);
+const allProcesses = ref([]);
 const loading = ref(true);
 const error = ref(null);
 const isReserving = ref(false);
 const isResetting = ref(false);
+const isProcessing = ref(false);
+const refreshInterval = ref(null);
 
-// Fetch GPU status on component mount
+// Get all reservations
+const reservations = ref([]);
+const fetchReservations = async () => {
+  try {
+    const response = await fetch(`${apiBaseUrl}/reservations`);
+    if (!response.ok) {
+      throw new Error(`Error ${response.status}: ${response.statusText}`);
+    }
+    reservations.value = await response.json();
+  } catch (err) {
+    console.error('Failed to fetch reservations:', err);
+  }
+};
+
+// Get all processes
+const fetchProcesses = async () => {
+  try {
+    const response = await fetch(`${apiBaseUrl}/processes`);
+    if (!response.ok) {
+      throw new Error(`Error ${response.status}: ${response.statusText}`);
+    }
+    allProcesses.value = await response.json();
+  } catch (err) {
+    console.error('Failed to fetch processes:', err);
+  }
+};
+
+// Fetch GPU status on component mount and start auto-refresh
 onMounted(() => {
   refreshClusterStatus();
+  fetchReservations();
+  fetchProcesses();
+  
+  // Set up auto-refresh every 5 seconds
+  refreshInterval.value = setInterval(() => {
+    refreshClusterStatus();
+    fetchReservations();
+    fetchProcesses();
+  }, 5000);
+});
+
+// Clear interval on component unmount
+onBeforeUnmount(() => {
+  if (refreshInterval.value) {
+    clearInterval(refreshInterval.value);
+  }
 });
 
 // Format time for display
@@ -88,8 +206,123 @@ const formatTime = (timestamp) => {
   return new Date(timestamp).toLocaleString();
 };
 
+// Format duration in seconds to human readable format
+const formatDuration = (seconds) => {
+  if (!seconds && seconds !== 0) return 'N/A';
+  
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = Math.floor(seconds % 60);
+  
+  return [
+    hours > 0 ? `${hours}h` : '',
+    minutes > 0 ? `${minutes}m` : '',
+    `${secs}s`
+  ].filter(Boolean).join(' ');
+};
+
+// Check if GPU is reserved
+const isGpuReserved = (gpu) => {
+  return reservations.value.some(r => r.gpu_id === gpu.gpu_id);
+};
+
+// Get reservation user for a GPU
+const getReservationUser = (gpu) => {
+  const reservation = reservations.value.find(r => r.gpu_id === gpu.gpu_id);
+  return reservation ? reservation.user : null;
+};
+
+// Get reservation end time for a GPU
+const getReservationEndTime = (gpu) => {
+  const reservation = reservations.value.find(r => r.gpu_id === gpu.gpu_id);
+  return reservation ? reservation.end_time : null;
+};
+
+// Memory usage methods
+const getMemoryTotal = (gpu) => {
+  if (gpu.real_metrics?.memory?.total) {
+    return gpu.real_metrics.memory.total.toFixed(1);
+  }
+  return gpu.max_memory || 0;
+};
+
+const getMemoryUsed = (gpu) => {
+  if (gpu.real_metrics?.memory?.used) {
+    return gpu.real_metrics.memory.used.toFixed(1);
+  }
+  return gpu.used_memory || 0;
+};
+
+const getMemoryUsagePercent = (gpu) => {
+  const total = parseFloat(getMemoryTotal(gpu));
+  const used = parseFloat(getMemoryUsed(gpu));
+  
+  if (total && total > 0) {
+    return Math.min(Math.round((used / total) * 100), 100);
+  }
+  return 0;
+};
+
+// Get GPU utilization
+const getGpuUtilization = (gpu) => {
+  if (gpu.real_metrics?.utilization?.gpu !== undefined) {
+    return gpu.real_metrics.utilization.gpu;
+  }
+  return 0;
+};
+
+// Get GPU temperature
+const getGpuTemperature = (gpu) => {
+  if (gpu.real_metrics?.temperature !== undefined) {
+    return gpu.real_metrics.temperature;
+  }
+  return 'N/A';
+};
+
+// Get GPU power
+const getGpuPower = (gpu) => {
+  if (gpu.real_metrics?.power) {
+    return gpu.real_metrics.power.toFixed(1);
+  }
+  return 0;
+};
+
+// Check if GPU has running processes
+const hasRunningProcesses = (gpu) => {
+  if (gpu.real_metrics?.processes && gpu.real_metrics.processes.length > 0) {
+    return true;
+  }
+  if (gpu.real_metrics?.managed_processes && gpu.real_metrics.managed_processes.length > 0) {
+    return true;
+  }
+  return false;
+};
+
+// Get running processes on a GPU
+const getRunningProcesses = (gpu) => {
+  const processes = [];
+  
+  if (gpu.real_metrics?.processes) {
+    processes.push(...gpu.real_metrics.processes.map(p => ({ ...p, type: 'system' })));
+  }
+  
+  if (gpu.real_metrics?.managed_processes) {
+    processes.push(...gpu.real_metrics.managed_processes.map(p => ({ ...p, type: 'managed' })));
+  }
+  
+  return processes;
+};
+
+// Check if we can start a process on this GPU
+const canStartProcess = (gpu) => {
+  // Allow starting process if GPU is not reserved
+  return !isGpuReserved(gpu);
+};
+
 // Fetch cluster status from API
 const refreshClusterStatus = async () => {
+  if (loading.value) return;
+  
   loading.value = true;
   error.value = null;
   
@@ -128,6 +361,7 @@ const resetCluster = async () => {
     }
     
     await refreshClusterStatus();
+    await fetchReservations();
   } catch (err) {
     error.value = err.message;
     console.error('Failed to reset cluster:', err);
@@ -168,11 +402,82 @@ const reserveGpu = async (gpuId) => {
     alert(`GPU ${result.gpu_id} reserved successfully. Reservation ID: ${result.reservation_id}`);
     
     await refreshClusterStatus();
+    await fetchReservations();
   } catch (err) {
     error.value = err.message;
     console.error('Failed to reserve GPU:', err);
   } finally {
     isReserving.value = false;
+  }
+};
+
+// Start a process on a GPU
+const startProcess = async (gpuId) => {
+  if (isProcessing.value) return;
+  
+  isProcessing.value = true;
+  
+  try {
+    const memory_usage = parseFloat(prompt('Enter memory usage in GB:', '1.0'));
+    const duration_minutes = parseInt(prompt('Enter process duration in minutes (0 for indefinite):', '30'));
+    
+    if (isNaN(memory_usage) || memory_usage <= 0) {
+      alert('Please enter a valid memory size');
+      return;
+    }
+    
+    const response = await fetch(`${apiBaseUrl}/start_process`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ gpu_id: gpuId, memory_usage, duration_minutes }),
+    });
+    
+    if (!response.ok) {
+      throw new Error(`Error ${response.status}: ${response.statusText}`);
+    }
+    
+    const result = await response.json();
+    alert(`Process started on GPU ${gpuId}. Process ID: ${result.process_id}`);
+    
+    await refreshClusterStatus();
+    await fetchProcesses();
+  } catch (err) {
+    error.value = err.message;
+    console.error('Failed to start process:', err);
+  } finally {
+    isProcessing.value = false;
+  }
+};
+
+// Stop a running process
+const stopProcess = async (processId) => {
+  if (isProcessing.value) return;
+  
+  isProcessing.value = true;
+  
+  try {
+    const response = await fetch(`${apiBaseUrl}/stop_process/${processId}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    });
+    
+    if (!response.ok) {
+      throw new Error(`Error ${response.status}: ${response.statusText}`);
+    }
+    
+    alert(`Process ${processId} stopped successfully.`);
+    
+    await refreshClusterStatus();
+    await fetchProcesses();
+  } catch (err) {
+    error.value = err.message;
+    console.error('Failed to stop process:', err);
+  } finally {
+    isProcessing.value = false;
   }
 };
 </script>
@@ -226,6 +531,23 @@ const reserveGpu = async (gpuId) => {
   background-color: #27ae60;
 }
 
+.process-btn {
+  background-color: #9b59b6;
+  color: white;
+  margin-left: 0.5rem;
+}
+
+.process-btn:hover {
+  background-color: #8e44ad;
+}
+
+.stop-btn {
+  background-color: #e74c3c;
+  color: white;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.875rem;
+}
+
 .btn:disabled {
   opacity: 0.6;
   cursor: not-allowed;
@@ -233,7 +555,7 @@ const reserveGpu = async (gpuId) => {
 
 .gpus-container {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
   gap: 1.5rem;
 }
 
@@ -282,6 +604,36 @@ const reserveGpu = async (gpuId) => {
   color: #e74c3c;
 }
 
+.memory-bar {
+  margin-bottom: 1.25rem;
+}
+
+.memory-label {
+  margin-bottom: 0.25rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.memory-progress {
+  height: 0.75rem;
+  background-color: #ecf0f1;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.memory-used {
+  height: 100%;
+  background-color: #3498db;
+  border-radius: 999px;
+  transition: width 0.3s ease;
+}
+
+.memory-text {
+  margin-top: 0.25rem;
+  font-size: 0.875rem;
+  text-align: right;
+}
+
 .gpu-info {
   margin-bottom: 1rem;
 }
@@ -299,6 +651,67 @@ const reserveGpu = async (gpuId) => {
 
 .value {
   font-weight: 600;
+}
+
+.processes-section {
+  margin-top: 1rem;
+  margin-bottom: 1rem;
+  border-top: 1px solid #ecf0f1;
+  padding-top: 0.75rem;
+}
+
+.processes-section h4 {
+  margin-top: 0;
+  margin-bottom: 0.75rem;
+  font-size: 1rem;
+}
+
+.process {
+  background-color: #f8f9fa;
+  padding: 0.75rem;
+  border-radius: 4px;
+  margin-bottom: 0.5rem;
+}
+
+.process-header {
+  display: flex;
+  justify-content: space-between;
+  font-weight: 500;
+  margin-bottom: 0.25rem;
+}
+
+.process-memory {
+  color: #2980b9;
+}
+
+.process-info {
+  font-size: 0.875rem;
+  color: #7f8c8d;
+}
+
+.gpu-actions {
+  margin-top: 1.25rem;
+  display: flex;
+}
+
+.processes-management {
+  margin-top: 3rem;
+}
+
+.processes-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.processes-table th, .processes-table td {
+  padding: 0.75rem 1rem;
+  text-align: left;
+  border-bottom: 1px solid #ecf0f1;
+}
+
+.processes-table th {
+  font-weight: 600;
+  background-color: #f8f9fa;
 }
 
 .loading, .error {
