@@ -423,6 +423,161 @@ def get_processes():
         )
 
 
+@app.post("/worker_status")
+def receive_worker_status(status: Dict[str, Any]):
+    """Receive worker status updates from workers."""
+    try:
+        node_id = status.get("node_id")
+        gpu_id = status.get("gpu_id")
+        worker_id = status.get("worker_id")
+
+        if not all([node_id, gpu_id, worker_id]):
+            raise HTTPException(
+                status_code=400, detail="Missing required status information"
+            )
+
+        # Store/update the worker in registered_workers
+        registered_workers[worker_id] = {
+            "worker_id": worker_id,
+            "node_id": node_id,
+            "gpu_id": gpu_id,
+            "last_seen": datetime.now().isoformat(),
+            "cuda_available": status.get("cuda_available", False),
+            "processes": status.get("processes", []),
+        }
+
+        # Also update GPU metrics with basic info
+        metric_key = f"{node_id}_{gpu_id}"
+        if metric_key not in gpu_metrics:
+            gpu_metrics[metric_key] = {}
+
+        gpu_metrics[metric_key]["managed_processes"] = status.get("processes", [])
+
+        return {"status": "received"}
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Failed to process worker status: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to process worker status: {str(e)}"
+        )
+
+
+@app.post("/run_workload", response_model=Dict[str, str])
+def run_workload(
+    gpu_id: str,
+    memory_usage: float = 1.0,
+    duration_minutes: int = -1,
+    custom_code: str = None,
+):
+    """Start a workload on a specific GPU."""
+    try:
+        # Check if GPU exists and is available
+        worker_found = False
+        worker_container = None
+
+        for worker_id, info in registered_workers.items():
+            if info["gpu_id"] == gpu_id:
+                worker_found = True
+                worker_container = f"gpu_worker_{int(gpu_id) + 1}"
+                break
+
+        if not worker_found:
+            raise HTTPException(
+                status_code=404, detail=f"No worker found for GPU {gpu_id}"
+            )
+
+        # Construct the endpoint URL for the worker
+        worker_url = f"http://{worker_container}:8001/start_process"
+
+        # Prepare the request data
+        request_data = {
+            "memory_usage": memory_usage,
+            "duration_minutes": duration_minutes,
+        }
+
+        if custom_code:
+            request_data["custom_code"] = custom_code
+
+        # Send the request to the worker
+        response = requests.post(
+            worker_url,
+            json=request_data,
+            headers={"Content-Type": "application/json"},
+        )
+
+        if response.status_code != 200:
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Worker returned error: {response.text}",
+            )
+
+        result = response.json()
+        process_id = result.get("process_id")
+
+        return {
+            "status": "started",
+            "process_id": process_id,
+            "gpu_id": gpu_id,
+        }
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Failed to run workload: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to run workload: {str(e)}")
+
+
+@app.post("/stop_workload/{process_id}", response_model=Dict[str, str])
+def stop_workload(process_id: str):
+    """Stop a running workload."""
+    try:
+        # Find which worker is running this process
+        target_worker = None
+        gpu_id = None
+
+        for worker_id, info in registered_workers.items():
+            for proc in info.get("processes", []):
+                if proc.get("process_id") == process_id:
+                    gpu_id = info["gpu_id"]
+                    target_worker = f"gpu_worker_{int(gpu_id) + 1}"
+                    break
+            if target_worker:
+                break
+
+        if not target_worker:
+            raise HTTPException(
+                status_code=404, detail=f"Process {process_id} not found"
+            )
+
+        # Construct the endpoint URL for the worker
+        worker_url = f"http://{target_worker}:8001/stop_process"
+
+        # Send the request to the worker
+        response = requests.post(
+            worker_url,
+            json={"process_id": process_id},
+            headers={"Content-Type": "application/json"},
+        )
+
+        if response.status_code != 200:
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Worker returned error: {response.text}",
+            )
+
+        return {
+            "status": "stopped",
+            "process_id": process_id,
+        }
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Failed to stop workload: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to stop workload: {str(e)}"
+        )
+
+
 if __name__ == "__main__":
     # Make sure DB exists and tables are created before starting
     # This is already handled by the startup event, but can be kept for running directly

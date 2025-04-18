@@ -95,6 +95,34 @@
             >
               <i class="fas fa-play"></i> Start Process
             </button>
+            
+            <!-- New workload buttons -->
+            <button
+              v-if="isGpuReserved(gpu) && !hasRunningWorkload(gpu)"
+              @click="startDummyWorkload(gpu.gpu_id)"
+              class="btn workload-btn"
+              :disabled="isProcessing"
+            >
+              <i class="fas fa-cogs"></i> Run Dummy Workload
+            </button>
+            
+            <button
+              v-if="isGpuReserved(gpu) && hasRunningWorkload(gpu)"
+              @click="stopWorkload(getRunningWorkloadId(gpu))"
+              class="btn stop-workload-btn"
+              :disabled="isProcessing"
+            >
+              <i class="fas fa-stop"></i> Stop Workload
+            </button>
+            
+            <button
+              v-if="isGpuReserved(gpu)"
+              @click="startCustomWorkload(gpu.gpu_id)"
+              class="btn custom-workload-btn"
+              :disabled="isProcessing"
+            >
+              <i class="fas fa-code"></i> Custom Workload
+            </button>
           </div>
         </div>
       </div>
@@ -476,6 +504,162 @@ const stopProcess = async (processId) => {
   } catch (err) {
     error.value = err.message;
     console.error('Failed to stop process:', err);
+  } finally {
+    isProcessing.value = false;
+  }
+};
+
+// Check if GPU has a running workload specifically
+const hasRunningWorkload = (gpu) => {
+  if (!gpu.real_metrics?.managed_processes) return false;
+  return gpu.real_metrics.managed_processes.some(p => p.process_id && p.process_id.startsWith('proc_'));
+};
+
+// Get running workload ID if available
+const getRunningWorkloadId = (gpu) => {
+  if (!gpu.real_metrics?.managed_processes) return null;
+  const workload = gpu.real_metrics.managed_processes.find(p => p.process_id && p.process_id.startsWith('proc_'));
+  return workload ? workload.process_id : null;
+};
+
+// Start a simple dummy workload on a reserved GPU
+const startDummyWorkload = async (gpuId) => {
+  if (isProcessing.value) return;
+  
+  isProcessing.value = true;
+  
+  try {
+    // Default memory usage for dummy workload: 1GB
+    const memory_usage = 1.0;
+    // Run indefinitely until stopped
+    const duration_minutes = -1;
+    
+    const response = await fetch(`${apiBaseUrl}/run_workload`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ 
+        gpu_id: gpuId, 
+        memory_usage, 
+        duration_minutes 
+      }),
+    });
+    
+    if (!response.ok) {
+      throw new Error(`Error ${response.status}: ${response.statusText}`);
+    }
+    
+    const result = await response.json();
+    alert(`Dummy workload started on GPU ${gpuId}. Process ID: ${result.process_id}`);
+    
+    await refreshClusterStatus();
+    await fetchProcesses();
+  } catch (err) {
+    error.value = err.message;
+    console.error('Failed to start dummy workload:', err);
+  } finally {
+    isProcessing.value = false;
+  }
+};
+
+// Start a custom workload with PyTorch code
+const startCustomWorkload = async (gpuId) => {
+  if (isProcessing.value) return;
+  
+  isProcessing.value = true;
+  
+  try {
+    // Get memory usage and custom code from user
+    const memory_usage = parseFloat(prompt('Enter memory usage in GB:', '1.0'));
+    
+    const defaultCode = 
+`# PyTorch code to run on the GPU
+import time
+
+# Use the device provided in the environment
+# Access with the 'device' variable
+
+# Create some tensors on the GPU
+a = torch.rand(8000, 8000, device=device)
+b = torch.rand(8000, 8000, device=device)
+
+# Run computation until the worker stops us
+while is_running():
+    # Matrix multiplication
+    c = torch.matmul(a, b)
+    
+    # Print some info to the logs
+    logger.info(f"Running custom code on {device}")
+    
+    # Sleep a bit to avoid maxing out the GPU
+    time.sleep(1.0)
+`;
+
+    const custom_code = prompt('Enter custom PyTorch code to execute:', defaultCode);
+    
+    if (!custom_code || isNaN(memory_usage) || memory_usage <= 0) {
+      alert('Please enter valid memory size and code');
+      isProcessing.value = false;
+      return;
+    }
+    
+    const response = await fetch(`${apiBaseUrl}/run_workload`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ 
+        gpu_id: gpuId, 
+        memory_usage, 
+        duration_minutes: -1,
+        custom_code 
+      }),
+    });
+    
+    if (!response.ok) {
+      throw new Error(`Error ${response.status}: ${response.statusText}`);
+    }
+    
+    const result = await response.json();
+    alert(`Custom workload started on GPU ${gpuId}. Process ID: ${result.process_id}`);
+    
+    await refreshClusterStatus();
+    await fetchProcesses();
+  } catch (err) {
+    error.value = err.message;
+    console.error('Failed to start custom workload:', err);
+  } finally {
+    isProcessing.value = false;
+  }
+};
+
+// Stop a running workload
+const stopWorkload = async (processId) => {
+  if (isProcessing.value || !processId) return;
+  
+  isProcessing.value = true;
+  
+  try {
+    const response = await fetch(`${apiBaseUrl}/stop_workload/${processId}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    });
+    
+    if (!response.ok) {
+      throw new Error(`Error ${response.status}: ${response.statusText}`);
+    }
+    
+    const result = await response.json();
+    alert(`Workload ${processId} stopped successfully.`);
+    
+    await refreshClusterStatus();
+    await fetchProcesses();
+  } catch (err) {
+    error.value = err.message;
+    console.error('Failed to stop workload:', err);
   } finally {
     isProcessing.value = false;
   }
