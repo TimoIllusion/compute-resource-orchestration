@@ -1,19 +1,29 @@
 version: "3.9"
 
 services:
-  streamlit_app:
-    build: .
-    container_name: streamlit_app
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gpu_orchestrator_api
     ports:
-      - "8501:8501"
-    volumes:
-      # Mount the current folder inside the container
-      # so you can quickly update code without rebuilding (optional)
-      - .:/app
-    # If you want the SQLite DB to persist on the host system, you could do:
-    # - ./reservations.db:/app/reservations.db
+      - "8000:8000"
+    restart: unless-stopped
     environment:
-      # If you need environment variables
-      # - Example: "production", "dev", etc.
-      # - STREAMLIT_ENV=production
       - PYTHONUNBUFFERED=1
+      # Add any production-specific environment variables here
+    
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: gpu_orchestrator_ui
+    ports:
+      - "8080:80" # Map host port 8080 to container port 80 (nginx)
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      # Point the Vue app to the backend API - modify this URL for production
+      - VITE_API_URL=http://localhost:8000
+    depends_on:
+      - backend

@@ -1,16 +1,41 @@
 version: "3.9"
 
 services:
-  streamlit_dev:
+  backend:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: streamlit_dev
+    container_name: gpu_orchestrator_api
     ports:
-      - "8501:8501"
+      - "8000:8000"
     volumes:
       # This mounts your current directory on the host into /app in the container
       - .:/app
+      # Exclude the frontend directory to avoid copying unnecessary files
+      - /app/frontend
+      # Exclude the node_modules directory if it exists in the root
+      - /app/node_modules
     environment:
       - PYTHONUNBUFFERED=1
-    command: ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+    # Override the CMD in Dockerfile to use auto-reload for development
+    command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    container_name: gpu_orchestrator_ui
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./frontend:/app
+      # Don't sync node_modules between host and container
+      - /app/node_modules
+    environment:
+      - NODE_ENV=development
+      # Point the Vue app to the backend API
+      - VITE_API_URL=http://localhost:8000
+    # Hot reload is enabled by default in the Vue dev server
+    command: ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
+    depends_on:
+      - backend

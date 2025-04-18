@@ -1,140 +1,210 @@
-# main.py
-import streamlit as st
-from cluster import (
-    list_nodes,
-    find_best_gpu,
-    reserve_gpu,
-    reset_cluster,
+import uvicorn
+from fastapi import FastAPI, HTTPException, Depends
+from fastapi.middleware.cors import CORSMiddleware
+import cluster
+import db
+from typing import List, Dict, Optional
+import sqlite3  # Import sqlite3 for exception handling
+
+# Initialize FastAPI app
+app = FastAPI(title="Compute Resource Orchestrator API")
+
+# Allow CORS for frontend development (adjust in production)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "*"
+    ],  # Or specify your frontend origin e.g., "http://localhost:8080"
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# We only need the cluster methods for logic; DB is handled behind the scenes in cluster.py
 
-# ---------------------------------------
-# Streamlit App
-# ---------------------------------------
+# Dependency to get DB connection
+def get_db_conn():
+    conn = db.create_connection()
+    if conn is None:
+        # This should ideally not happen if db.py handles errors, but good practice
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    try:
+        yield conn
+    finally:
+        if conn:
+            conn.close()
 
-# Maintain some UI states
-if "reservation_pending" not in st.session_state:
-    st.session_state.reservation_pending = False
-    st.session_state.pending_reservation = None
 
-st.title("Monolithic CPU/Memory/GPU Orchestration App")
+@app.on_event("startup")
+def on_startup():
+    """Initialize the database on startup."""
+    conn = None
+    try:
+        conn = db.create_connection()
+        if conn:
+            db.create_tables(conn)
+        else:
+            print("ERROR: Could not create database connection on startup.")
+    except Exception as e:
+        print(f"ERROR: Database initialization failed: {e}")
+    finally:
+        if conn:
+            conn.close()
+    # Initialize cluster state (optional, depending on desired startup behavior)
+    # cluster.initialize_cluster_state() # You might want this
 
-tabs = st.tabs(["GPU Requests", "Cluster Status"])
 
-# ---------------- GPU Requests Tab ----------------
-with tabs[0]:
-    st.header("Request GPU Resources")
-
-    with st.form(key="gpu_request_form"):
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            user = st.text_input("Your name", value="")
-        with col2:
-            mem_required = st.number_input(
-                "Memory required (GB)", min_value=1, step=1, value=5
-            )
-        with col3:
-            session_type = st.selectbox("Session type", ["interactive", "job"])
-
-        submit = st.form_submit_button("Find Best Available GPU")
-
-        if submit and user.strip():
-            response = find_best_gpu(user, mem_required, session_type)
-            if response["status"] == "ok":
-                # Store response in session state so we can confirm/cancel
-                st.session_state.reservation_pending = True
-                st.session_state.pending_reservation = {
-                    "node_id": response["node_id"],
-                    "gpu_id": response["gpu_id"],
-                    "available_mem": response["available_mem"],
-                    "user_name": user,
-                    "mem_required": mem_required,
-                    "session_type": session_type,
-                }
-                st.rerun()
-            else:
-                st.error(response["message"])
-
-    # If a reservation is "pending," show confirmation
-    if st.session_state.reservation_pending:
-        res = st.session_state.pending_reservation
-        st.success(
-            f"Found GPU on Node {res['node_id']} GPU {res['gpu_id']}! "
-            f"Available memory: {res['available_mem']:.1f} GB"
+@app.get("/status", response_model=List[Dict])
+def get_cluster_status():
+    """Get the current status of all GPUs in the cluster."""
+    try:
+        return cluster.get_gpu_status()
+    except Exception as e:
+        # Log the error e
+        # Add a pass statement or actual logging here
+        pass  # Placeholder to fix indentation error
+        raise HTTPException(
+            status_code=500, detail=f"Failed to get cluster status: {str(e)}"
         )
 
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("Confirm Reservation"):
-                confirm = reserve_gpu(
-                    res["node_id"],
-                    res["gpu_id"],
-                    res["user_name"],
-                    res["mem_required"],
-                )
-                if confirm["status"] == "reserved":
-                    st.session_state.reservation_pending = False
-                    st.session_state.pending_reservation = None
-                    st.success("GPU Reserved successfully!")
-                    st.rerun()
-                else:
-                    st.error(confirm["message"])
 
-        with col2:
-            if st.button("Cancel"):
-                st.session_state.reservation_pending = False
-                st.session_state.pending_reservation = None
-                st.rerun()
+@app.post("/reserve")
+# Added response model for clarity - moved comment
+def reserve_gpu(
+    user: str = "default_user",
+    duration_hours: int = 1,
+    conn: sqlite3.Connection = Depends(get_db_conn),
+):
+    """Find the best available GPU and reserve it."""
+    # In the future, 'user' will come from authentication
+    try:
+        best_gpu_id = cluster.find_best_gpu()
+        if best_gpu_id is None:
+            raise HTTPException(status_code=404, detail="No suitable GPU available")
+
+        # Correctly call reserve_gpu with parameters
+        reservation_id = cluster.reserve_gpu(conn, best_gpu_id, user, duration_hours)
+        return {
+            "message": f"GPU {best_gpu_id} reserved successfully",
+            "reservation_id": reservation_id,
+            "gpu_id": best_gpu_id,
+        }
+    except (
+        ValueError
+    ) as e:  # Specific exception from cluster.reserve_gpu if already reserved
+        raise HTTPException(
+            status_code=409, detail=str(e)
+        )  # Conflict if already reserved
+    except HTTPException as e:  # Re-raise HTTP exceptions
+        raise e
+    except Exception as e:
+        # Log the error e
+        raise HTTPException(status_code=500, detail=f"Failed to reserve GPU: {str(e)}")
 
 
-# ---------------- Cluster Status Tab ----------------
-with tabs[1]:
-    st.header("Cluster Status")
+@app.post("/cancel/{reservation_id}")
+# Added response model - moved comment
+def cancel_reservation_endpoint(
+    reservation_id: int, conn: sqlite3.Connection = Depends(get_db_conn)
+):
+    """Cancel an existing reservation."""
+    # Add user check here later based on authentication
+    try:
+        success = cluster.cancel_reservation(conn, reservation_id)
+        if success:
+            return {"message": f"Reservation {reservation_id} cancelled successfully."}
+        else:
+            # This might happen if the reservation doesn't exist or doesn't belong to the user (future)
+            raise HTTPException(
+                status_code=404,
+                detail=f"Reservation {reservation_id} not found or could not be cancelled.",
+            )
+    except HTTPException as e:  # Re-raise HTTP exceptions
+        raise e
+    except Exception as e:
+        # Log the error e
+        raise HTTPException(
+            status_code=500, detail=f"Failed to cancel reservation: {str(e)}"
+        )
 
-    # RESET button
-    if st.button("Reset All Reservations and Processes"):
-        reset_cluster()
-        st.success("All reservations and processes cleared!")
-        st.rerun()
 
-    data = list_nodes()
-    for node_id, node_info in data.items():
-        with st.expander(f"Node: {node_id}", expanded=True):
-            cpu_col, mem_col = st.columns(2)
-            with cpu_col:
-                st.write(f"**CPU Usage:** {node_info.cpu_usage:.2f}%")
-            with mem_col:
-                st.write(f"**Memory Usage:** {node_info.mem_usage:.2f} GB")
+@app.get("/reservations", response_model=List[Dict])
+def get_all_reservations(
+    user: Optional[str] = None, conn: sqlite3.Connection = Depends(get_db_conn)
+):
+    """Get all active reservations, optionally filtered by user."""
+    # Filter by user will be important with authentication
+    try:
+        reservations = db.get_active_reservations(conn, user_filter=user)
+        # Convert tuples to dicts for easier JSON serialization
+        return [
+            {
+                "id": r[0],
+                "gpu_id": r[1],
+                "user": r[2],
+                "start_time": r[3],
+                "end_time": r[4],
+            }
+            for r in reservations
+        ]
+    except Exception as e:
+        # Log the error e
+        raise HTTPException(
+            status_code=500, detail=f"Failed to retrieve reservations: {str(e)}"
+        )
 
-            for gpu_id, gpu_info in node_info.gpus.items():
-                st.write(f"---\n**GPU {gpu_id}:**")
-                col_gpu_mem, col_reservations = st.columns([1, 1])
-                with col_gpu_mem:
-                    total_usage = gpu_info.total_usage()
-                    st.write(
-                        f"Memory Usage: {total_usage:.2f} GB / {gpu_info.max_mem:.2f} GB"
-                    )
-                    st.write(
-                        f"Available Memory: {(gpu_info.max_mem - total_usage):.2f} GB"
-                    )
-                with col_reservations:
-                    st.write("**Reservations:**")
-                    if gpu_info.reservations:
-                        for reservation in gpu_info.reservations:
-                            st.write(
-                                f"- {reservation.user}: {reservation.mem_reserved:.1f} GB"
-                            )
-                    else:
-                        st.write("No reservations.")
 
-                st.write("**Processes:**")
-                if gpu_info.processes:
-                    for process in gpu_info.processes:
-                        st.write(
-                            f"- PID: {process.pid}, "
-                            f"User: {process.user}, "
-                            f"Memory: {process.mem_usage:.2f} GB"
-                        )
-                else:
-                    st.write("No active processes.")
+@app.post("/reset")
+# Added response model - moved comment
+def reset_cluster_endpoint(conn: sqlite3.Connection = Depends(get_db_conn)):
+    """Reset the cluster state and clear all reservations."""
+    try:
+        cluster.reset_reservations(conn)
+        # Re-initialize cluster state if needed
+        # cluster.initialize_cluster_state() # Consider if this is needed
+        return {"message": "Cluster reset successfully."}
+    except Exception as e:
+        # Log the error e
+        raise HTTPException(
+            status_code=500, detail=f"Failed to reset cluster: {str(e)}"
+        )
+
+
+# Add a find_best endpoint if needed separately from reserve
+@app.get("/find_best")
+# Added response model - moved comment
+def find_best_gpu_endpoint():
+    """Find the best available GPU without reserving it."""
+    try:
+        best_gpu_id = cluster.find_best_gpu()
+        if best_gpu_id is None:
+            raise HTTPException(status_code=404, detail="No suitable GPU available")
+        return {"best_gpu_id": best_gpu_id}
+    except Exception as e:
+        # Log the error e
+        raise HTTPException(
+            status_code=500, detail=f"Failed to find best GPU: {str(e)}"
+        )
+
+
+if __name__ == "__main__":
+    # Make sure DB exists and tables are created before starting
+    # This is already handled by the startup event, but can be kept for running directly
+    conn = None
+    try:
+        conn = db.create_connection()
+        if conn:
+            db.create_tables(conn)
+        else:
+            print("ERROR: Could not create database connection before starting server.")
+            # Decide if you want to exit here if DB connection fails
+    except Exception as e:
+        print(f"ERROR: Database check/creation failed before start: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+    print("Starting API server on http://0.0.0.0:8000")
+    # Ensure host and port are correct for Docker exposure
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+# Removed all Streamlit related code.
