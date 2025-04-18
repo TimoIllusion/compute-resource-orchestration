@@ -5,6 +5,15 @@ import cluster
 import db
 from typing import List, Dict, Optional
 import sqlite3  # Import sqlite3 for exception handling
+import logging
+
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler()],
+)
+logger = logging.getLogger(__name__)
 
 # Initialize FastAPI app
 app = FastAPI(title="Compute Resource Orchestrator API")
@@ -43,9 +52,9 @@ def on_startup():
         if conn:
             db.create_tables(conn)
         else:
-            print("ERROR: Could not create database connection on startup.")
+            logger.error("Could not create database connection on startup.")
     except Exception as e:
-        print(f"ERROR: Database initialization failed: {e}")
+        logger.error(f"Database initialization failed: {e}")
     finally:
         if conn:
             conn.close()
@@ -59,16 +68,13 @@ def get_cluster_status():
     try:
         return cluster.get_gpu_status()
     except Exception as e:
-        # Log the error e
-        # Add a pass statement or actual logging here
-        pass  # Placeholder to fix indentation error
+        logger.error(f"Failed to get cluster status: {e}")
         raise HTTPException(
             status_code=500, detail=f"Failed to get cluster status: {str(e)}"
         )
 
 
-@app.post("/reserve")
-# Added response model for clarity - moved comment
+@app.post("/reserve", response_model=Dict[str, str])
 def reserve_gpu(
     user: str = "default_user",
     duration_hours: int = 1,
@@ -85,31 +91,31 @@ def reserve_gpu(
         reservation_id = cluster.reserve_gpu(conn, best_gpu_id, user, duration_hours)
         return {
             "message": f"GPU {best_gpu_id} reserved successfully",
-            "reservation_id": reservation_id,
+            "reservation_id": str(reservation_id),
             "gpu_id": best_gpu_id,
         }
     except (
         ValueError
     ) as e:  # Specific exception from cluster.reserve_gpu if already reserved
+        logger.warning(f"GPU reservation conflict: {e}")
         raise HTTPException(
             status_code=409, detail=str(e)
         )  # Conflict if already reserved
     except HTTPException as e:  # Re-raise HTTP exceptions
         raise e
     except Exception as e:
-        # Log the error e
+        logger.error(f"Failed to reserve GPU: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to reserve GPU: {str(e)}")
 
 
-@app.post("/cancel/{reservation_id}")
-# Added response model - moved comment
+@app.post("/cancel/{reservation_id}", response_model=Dict[str, str])
 def cancel_reservation_endpoint(
     reservation_id: int, conn: sqlite3.Connection = Depends(get_db_conn)
 ):
     """Cancel an existing reservation."""
     # Add user check here later based on authentication
     try:
-        success = cluster.cancel_reservation(conn, reservation_id)
+        success = cluster.cancel_reservation_wrapper(conn, reservation_id)
         if success:
             return {"message": f"Reservation {reservation_id} cancelled successfully."}
         else:
@@ -121,7 +127,7 @@ def cancel_reservation_endpoint(
     except HTTPException as e:  # Re-raise HTTP exceptions
         raise e
     except Exception as e:
-        # Log the error e
+        logger.error(f"Failed to cancel reservation: {e}")
         raise HTTPException(
             status_code=500, detail=f"Failed to cancel reservation: {str(e)}"
         )
@@ -147,14 +153,13 @@ def get_all_reservations(
             for r in reservations
         ]
     except Exception as e:
-        # Log the error e
+        logger.error(f"Failed to retrieve reservations: {e}")
         raise HTTPException(
             status_code=500, detail=f"Failed to retrieve reservations: {str(e)}"
         )
 
 
-@app.post("/reset")
-# Added response model - moved comment
+@app.post("/reset", response_model=Dict[str, str])
 def reset_cluster_endpoint(conn: sqlite3.Connection = Depends(get_db_conn)):
     """Reset the cluster state and clear all reservations."""
     try:
@@ -163,15 +168,14 @@ def reset_cluster_endpoint(conn: sqlite3.Connection = Depends(get_db_conn)):
         # cluster.initialize_cluster_state() # Consider if this is needed
         return {"message": "Cluster reset successfully."}
     except Exception as e:
-        # Log the error e
+        logger.error(f"Failed to reset cluster: {e}")
         raise HTTPException(
             status_code=500, detail=f"Failed to reset cluster: {str(e)}"
         )
 
 
 # Add a find_best endpoint if needed separately from reserve
-@app.get("/find_best")
-# Added response model - moved comment
+@app.get("/find_best", response_model=Dict[str, str])
 def find_best_gpu_endpoint():
     """Find the best available GPU without reserving it."""
     try:
@@ -179,8 +183,10 @@ def find_best_gpu_endpoint():
         if best_gpu_id is None:
             raise HTTPException(status_code=404, detail="No suitable GPU available")
         return {"best_gpu_id": best_gpu_id}
+    except HTTPException as e:
+        raise e
     except Exception as e:
-        # Log the error e
+        logger.error(f"Failed to find best GPU: {e}")
         raise HTTPException(
             status_code=500, detail=f"Failed to find best GPU: {str(e)}"
         )
@@ -195,15 +201,15 @@ if __name__ == "__main__":
         if conn:
             db.create_tables(conn)
         else:
-            print("ERROR: Could not create database connection before starting server.")
+            logger.error("Could not create database connection before starting server.")
             # Decide if you want to exit here if DB connection fails
     except Exception as e:
-        print(f"ERROR: Database check/creation failed before start: {e}")
+        logger.error(f"Database check/creation failed before start: {e}")
     finally:
         if conn:
             conn.close()
 
-    print("Starting API server on http://0.0.0.0:8000")
+    logger.info("Starting API server on http://0.0.0.0:8000")
     # Ensure host and port are correct for Docker exposure
     uvicorn.run(app, host="0.0.0.0", port=8000)
 

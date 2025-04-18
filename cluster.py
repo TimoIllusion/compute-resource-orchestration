@@ -1,13 +1,15 @@
-# cluster.py
 import copy
 import time
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
+import sqlite3
+from datetime import datetime, timedelta
 
 # We import the DB operations from db.py
 from db import (
     get_reservations_from_db,
     add_reservation_to_db,
     clear_reservations_in_db,
+    cancel_reservation,
 )
 
 
@@ -103,6 +105,33 @@ node_data_static = {
 
 
 MEMORY_BUFFER_PER_RESERVATION = 1.0
+DEFAULT_MEMORY_REQUIREMENT = 2.0  # Default memory requirement if not specified
+
+
+def get_gpu_status() -> List[Dict[str, Any]]:
+    """
+    Returns the status of all GPUs in the cluster.
+    """
+    data = list_nodes()
+    result = []
+
+    for node_id, node in data.items():
+        for gpu_id, gpu in node.gpus.items():
+            result.append(
+                {
+                    "node_id": node_id,
+                    "gpu_id": gpu_id,
+                    "max_memory": gpu.max_mem,
+                    "used_memory": gpu.total_usage(),
+                    "available_memory": gpu.available_memory(
+                        MEMORY_BUFFER_PER_RESERVATION
+                    ),
+                    "num_processes": len(gpu.processes),
+                    "num_reservations": len(gpu.reservations),
+                }
+            )
+
+    return result
 
 
 def list_nodes() -> Dict[str, Node]:
@@ -123,12 +152,12 @@ def list_nodes() -> Dict[str, Node]:
     return data
 
 
-def find_best_gpu(
-    user_name: str, mem_required: float, session_type: str
-) -> Dict[str, Any]:
+def find_best_gpu() -> Optional[str]:
     """
-    Search for a GPU across all nodes that can accommodate 'mem_required'.
-    Return a dict with status and node/gpu info if found.
+    Find the best available GPU across all nodes.
+    Returns the GPU ID if found, None if not available.
+
+    This simplified version matches the app.py signature.
     """
     data = list_nodes()
     best_node = None
@@ -138,55 +167,76 @@ def find_best_gpu(
     for node_id, node in data.items():
         for gpu_id, gpu in node.gpus.items():
             mem_available = gpu.available_memory(MEMORY_BUFFER_PER_RESERVATION)
-            if mem_available >= mem_required and mem_available > most_available:
+            if (
+                mem_available >= DEFAULT_MEMORY_REQUIREMENT
+                and mem_available > most_available
+            ):
                 best_node = node_id
                 best_gpu_id = gpu_id
                 most_available = mem_available
 
-    if best_node is None:
-        return {"status": "error", "message": "No GPU with sufficient memory available"}
-    else:
-        return {
-            "status": "ok",
-            "node_id": best_node,
-            "gpu_id": best_gpu_id,
-            "available_mem": most_available,
-        }
+    # For now, return just the GPU ID as that's what app.py expects
+    return best_gpu_id
 
 
 def reserve_gpu(
-    node_id: str, gpu_id: str, user_name: str, mem_required: float
-) -> Dict[str, Any]:
+    conn: sqlite3.Connection, gpu_id: str, user_name: str, duration_hours: int = 1
+) -> int:
     """
-    Check GPU availability and then create a new reservation in the DB.
+    Create a new reservation for the given GPU and user.
+    Returns the reservation ID if successful.
+
+    This matches how it's called from app.py
     """
+    # Map GPU ID to node_id and gpu_id from our in-memory data
     data = list_nodes()
+    node_id = None
+    found_gpu_id = None
 
-    if node_id not in data:
-        return {"status": "error", "message": "Node not found"}
-    if gpu_id not in data[node_id].gpus:
-        return {"status": "error", "message": "GPU not found"}
+    # Find which node contains this GPU
+    for n_id, node in data.items():
+        if gpu_id in node.gpus:
+            node_id = n_id
+            found_gpu_id = gpu_id
+            break
 
-    gpu = data[node_id].gpus[gpu_id]
-    if gpu.available_memory(MEMORY_BUFFER_PER_RESERVATION) < mem_required:
-        return {"status": "error", "message": "Insufficient GPU memory for reservation"}
+    if node_id is None:
+        raise ValueError(f"GPU with ID {gpu_id} not found in any node")
 
-    # If sufficient memory available, add to DB
-    add_reservation_to_db(node_id, gpu_id, user_name, mem_required)
+    gpu = data[node_id].gpus[found_gpu_id]
 
-    return {
-        "status": "reserved",
-        "node_id": node_id,
-        "gpu_id": gpu_id,
-        "user": user_name,
-        "mem_reserved": mem_required,
-    }
+    # Check if enough memory is available
+    if gpu.available_memory(MEMORY_BUFFER_PER_RESERVATION) < DEFAULT_MEMORY_REQUIREMENT:
+        raise ValueError(f"Insufficient memory available on GPU {gpu_id}")
+
+    # Add the reservation to the database
+    try:
+        reservation_id = add_reservation_to_db(
+            node_id, found_gpu_id, user_name, DEFAULT_MEMORY_REQUIREMENT, duration_hours
+        )
+        return reservation_id
+    except Exception as e:
+        # Log the error
+        print(f"Error during reservation: {str(e)}")
+        raise
 
 
-def reset_cluster() -> None:
+def cancel_reservation_wrapper(conn: sqlite3.Connection, reservation_id: int) -> bool:
+    """
+    Cancel a reservation by ID.
+    Returns True if successful, False if not found.
+
+    This bridges the app.py call to db.py functionality.
+    """
+    return cancel_reservation(conn, reservation_id)
+
+
+def reset_reservations(conn: sqlite3.Connection) -> None:
     """
     1) Clears all processes in memory from node_data_static
     2) Clears all reservations in the DB
+
+    This matches the signature needed by app.py
     """
     # Clear all processes in memory
     for _, node in node_data_static.items():
